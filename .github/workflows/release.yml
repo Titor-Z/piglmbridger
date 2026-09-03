@@ -1,0 +1,132 @@
+name: Release
+
+# 推送 v* tag 触发构建并发布 GitHub Release
+# 产物矩阵：macOS arm64/x64、Windows x64、Linux x64/arm64（musl 静态）
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # 创建 Release 与上传产物需要
+
+env:
+  BIN_NAME: piglmbridger
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS：同一 runner 上交叉出两个架构（同 OS，零成本）
+          - { os: macos-latest, target: aarch64-apple-darwin, use-zigbuild: false }
+          - { os: macos-latest, target: x86_64-apple-darwin, use-zigbuild: false }
+          # Windows x64
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, use-zigbuild: false }
+          # Linux x64：musl 静态链接，扔到哪都能跑
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, use-zigbuild: false }
+          # Linux arm64：cargo-zigbuild 交叉（无需 QEMU）
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, use-zigbuild: true }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Linux arm64 走 zigbuild；其余走 rustup 原生/target 交叉
+      - name: Install cargo-zigbuild
+        if: matrix.use-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Install musl tools (linux x64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.use-zigbuild }}" = "true" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          DIR="${{ env.BIN_NAME }}-${{ matrix.target }}"
+          mkdir "$DIR"
+          cp "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}" "$DIR/"
+          cp README.md AGENTS.md "$DIR/" 2>/dev/null || true
+          tar czf "${DIR}.tar.gz" "$DIR"
+          shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "${{ env.BIN_NAME }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ env.BIN_NAME }}.exe" $dir
+          Copy-Item README.md $dir -ErrorAction SilentlyContinue
+          Copy-Item AGENTS.md $dir -ErrorAction SilentlyContinue
+          Compress-Archive -Path $dir -DestinationPath "${dir}.zip"
+          (Get-FileHash "${dir}.zip" -Algorithm SHA256).Hash | Set-Content "${dir}.zip.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BIN_NAME }}-${{ matrix.target }}
+          path: |
+            *.tar.gz*
+            *.zip*
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      # 从 AGENTS.md 抽取 [Unreleased] 段作为 Release 说明
+      - name: Extract release notes from AGENTS.md
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'EOF'
+          import os, re
+          tag = os.environ["TAG_NAME"]
+          text = open("AGENTS.md", encoding="utf-8").read()
+          m = re.search(r"### \[Unreleased\]\n(.*?)(?=\n### |\n## )", text, re.S)
+          notes = m.group(1).strip() if m else "See AGENTS.md for changes."
+          with open("RELEASE_NOTES.md", "w", encoding="utf-8") as f:
+              f.write(f"# piglmbridger {tag}\n\n{notes}\n")
+          EOF
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256

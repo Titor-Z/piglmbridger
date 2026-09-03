@@ -3,18 +3,11 @@
 > 专为 Pi-Agent + GLM-5.3-Flash 打造的 Rust 代理桥接器：修复智谱 SSE 流式分片破碎引发的无限重试、输出截断问题。
 > 配合 pi 内置 `zai` provider 覆写 baseUrl，对接智谱国内 API（open.bigmodel.cn）。
 
-（原名 glm-fix-proxy，已更名为 piglmbridger；旧路径 `~/glm-fix-proxy`、`~/.glm-fix-proxy` 留有软链兼容。）
 
 pi Agent → 本地代理 (默认 `127.0.0.1:8123`) → 智谱 GLM API (`https://open.bigmodel.cn/api/paas/v4`)
 
-## 它能做什么
-
-1. **字节缓冲**：按 UTF-8 字符边界截断，避免中文等多字节字符被 TCP 对半切开。
-2. **SSE 行缓冲/重组**：残缺、跨包拆分的不完整 `data:` 行先缓存拼接，完整后再下发。
-3. **过滤无效帧**：空 `data:` 帧、重复的 `data: [DONE]`。
-4. **断流保护**（`drain_abrupt`）：上游把 `data:` 帧切半后砍断连接时，直接丢弃残帧并记 `[ERROR]`，
-   绝不补 `\n` 伪造半条 JSON——那会触发下游 `Unterminated string in JSON`。
-5. **文件日志 + 实时跟踪**：每次请求记录耗时/下发行数/丢弃帧数，另开终端可 `logs --follow` 实时查看。
+## 为什么用它 ？
+在`pi`中，使用 `ZAI` 的 `GLM-5.3-flash` 模型，会遇到输出一卡一卡的、或者运行着突然不停的 连接重试、之后会频繁的报错退出执行状态，这都是 `GLM-5.3-flash` 和 `pi` 在设计上有不兼容的地方造成的，为了修复这方面的问题，建议你使用本程序。
 
 ## 构建与运行
 
@@ -82,7 +75,7 @@ pi 用一个扩展把内置 `zai` provider 的 baseUrl 指到本地代理，端�
 |---|---|---|
 | 配置文件 | `~/.piglmbridger/config.toml` → `port` | 8123 |
 | CLI | `--port`（会覆盖配置文件） | — |
-| pi 扩展 | `~/.pi/agent/extensions/glm-proxy.ts` 里 `PIGLMBRIDGER_PORT（旧名 GLM_FIX_PROXY_PORT 仍兼容）` 或 `DEFAULT_PORT` | 8123 |
+| pi 扩展 | `~/.pi/agent/extensions/glm-proxy.ts` 里 `PIGLMBRIDGER_PORT`（旧名 `GLM_FIX_PROXY_PORT` 仍兼容）或 `DEFAULT_PORT` | 8123 |
 
 改端口时三处同步（例如改成 9999）：
 
@@ -94,7 +87,7 @@ sed -i '' 's/port = 8123/port = 9999/' ~/.piglmbridger/config.toml
 ./target/release/piglmbridger serve
 
 # 3) 改扩展端口并重启 pi
-#    设置环境变量：export PIGLMBRIDGER_PORT（旧名 GLM_FIX_PROXY_PORT 仍兼容）=9999
+#    设置环境变量：export PIGLMBRIDGER_PORT=9999   （旧名 GLM_FIX_PROXY_PORT 仍兼容）
 #    或修改 glm-proxy.ts 的 DEFAULT_PORT = 9999
 pi
 ```
