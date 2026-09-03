@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> 本项目（`glm-fix-proxy`）的工程记忆 / 协作笔记本。
+> 本项目（`piglmbridger`）的工程记忆 / 协作笔记本。
 > 供 **AI 代理（任何 agent）** 与 **人类协作者** 共用，作为唯一的“状态快照 + 决策+踩坑溯源”。
 >
 > 读取约定：
@@ -16,13 +16,14 @@
 > 给 GitHub Action 发 GitHub Release 时用的正文。按最新→最旧排列，HEAD 即下一个待发版内容。
 
 ### [Unreleased]
+- **更名**：项目 `glm-fix-proxy` → **`piglmbridger`**（二进制/包名/配置目录 `~/.piglmbridger` 同步更名；旧路径留软链兼容；env `PIGLMBRIDGER_PORT` 兼容旧 `GLM_FIX_PROXY_PORT`）。
 - **新增**：仓库附带 pi 接入资产 `pi/` 目录（`pi/extensions/glm-proxy.ts` + `pi/settings.glm-snippet.json`），代理与 pi 侧配置一套交付；README 补安装说明。
 - **修复**【重要·根治间歇性断帧】：修正 agent SSE 行重组逻辑
   - 之前：某次上游网络块既含完整 `data:` 行、又含半截未写完的行时，默认其“整块无换行才等下一块”，导致半截 JSON 被当成完整帧下发给 pi → `Unterminated string in JSON` / 反复重试。
   - 现在：仅将真正以换行/空行收尾的片段下发给下游；未写完的尾部一律留缓冲，待下一块拼齐后再发；绝不伪造残缺帧。修复前触发场景约 60% 失败，修复后压测 14/14 通过。
 - **新增**：异常切断的上游段落不再被“补换行伪造”成数据帧，而是显式丢弃并记 `[ERROR]`（`drain_abrupt`），杜绝 `Unterminated string`。
-- **新增**：CLI 子命令 `serve`/`logs`；`--port/--upstream/--timeout` 参数；配置文件 `~/.glm-fix-proxy/config.toml`（优先级 CLI>配置>默认）。
-- **新增**：文件日志（`~/.glm-fix-proxy/logs/proxy.log`，自动轮转）+ `logs --follow/--lines` 实时跟踪与查看。
+- **新增**：CLI 子命令 `serve`/`logs`；`--port/--upstream/--timeout` 参数；配置文件 `~/.piglmbridger/config.toml`（优先级 CLI>配置>默认）。
+- **新增**：文件日志（`~/.piglmbridger/logs/proxy.log`，自动轮转）+ `logs --follow/--lines` 实时跟踪与查看。
 - **新增**：5 个单元测试（含“同块完整行+残缺尾行跨块拼接”回归用例）。
 - **工程**：新增 `README.md`、本文件 `AGENTS.md`。
 
@@ -44,7 +45,7 @@
 **结论**：配置里并不存在 `streaming.chunkParseStrict` 与顶层 `retry.maxDelayMs`，是无效键，已剔除。仅是“症状缓解”，不是根因。
 
 ### D03 — 接入方式：用扩展改 zai baseUrl 而非 /login 自配
-pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai` provider（含 glm-5.3-flash）。方案：`~/.pi/agent/extensions/glm-proxy.ts` 覆盖 `zai` 的 baseUrl 到本地代理，端口可由 `GLM_FIX_PROXY_PORT`（默认 8123）配置。
+pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai` provider（含 glm-5.3-flash）。方案：`~/.pi/agent/extensions/glm-proxy.ts` 覆盖 `zai` 的 baseUrl 到本地代理，端口可由 `PIGLMBRIDGER_PORT（旧名 GLM_FIX_PROXY_PORT 仍兼容）`（默认 8123）配置。
 **结论**：不动脑搭建复杂 provider，直接复用内置模型 definition 与鉴权通道；端口需要与代理配置 / config.toml / CLI `--port` 三处同步（见 README）。
 
 ### D04 — 抓住第一个真实 bug：断流时伪造半帧
@@ -76,7 +77,7 @@ pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai
 ### 已完成 ✅
 - [x] pi settings：宽松重试（maxRetries=1、basDelay=6000、timeoutMs=120000、httpIdleTimeoutMs=120000）；已剔除无效键。
 - [x] Rust 代理功能集齐：`serve`/`logs` 子命令、`--port/--upstream/--timeout`、`config.toml`、文件日志 + follow、日志轮转。
-- [x] pi 扩展 `glm-proxy.ts`：zai baseUrl → 本地代理；端口可用 `GLM_FIX_PROXY_PORT`（默认 8123）改。
+- [x] pi 扩展 `glm-proxy.ts`：zai baseUrl → 本地代理；端口可用 `PIGLMBRIDGER_PORT（旧名 GLM_FIX_PROXY_PORT 仍兼容）`（默认 8123）改。
 - [x] settings 保险：modelThinkingLevels 里把 glm-5.3 系列默认思考钉到 `low`（防用户手动拉到 off 的裸奔 1210）。
 - [x] 修复同块“完整行+残缺尾行”误整帧（root cause，[Unreleased]）。
 - [x] SSE 断流残帧丢弃逻辑（不伪造）。
@@ -129,12 +130,12 @@ GLM 官方约只有 payload 大体兼容；`tool_stream`、thinking 策略、分
 ## 附：相关路径速查
 | 项 | 路径 / 命令 |
 |---|---|
-| 源码 | `~/glm-fix-proxy/src/main.rs`、`src/logger.rs` |
-| 配置 | `~/.glm-fix-proxy/config.toml` |
-| 日志 | `~/.glm-fix-proxy/logs/proxy.log`（logs -f 看） |
+| 源码 | `~/piglmbridger/src/main.rs`、`src/logger.rs` |
+| 配置 | `~/.piglmbridger/config.toml` |
+| 日志 | `~/.piglmbridger/logs/proxy.log`（logs -f 看） |
 | pi 扩展（本仓库参考版） | `pi/extensions/glm-proxy.ts` |
 | pi settings 片段（本仓库参考版） | `pi/settings.glm-snippet.json` |
 | pi 扩展（已安装） | `~/.pi/agent/extensions/glm-proxy.ts` |
 | pi settings | `~/.pi/agent/settings.json` |
 | 构建/测试 | `cargo build --release`、`cargo test` |
-| 运行 | `./target/release/glm-fix-proxy serve [--port]` |
+| 运行 | `./target/release/piglmbridger serve [--port]` |

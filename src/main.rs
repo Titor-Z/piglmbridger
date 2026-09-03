@@ -1,11 +1,11 @@
 //! GLM-5.3-Flash SSE 分片修复中转代理
 //!
 //! 用法：
-//!   glm-fix-proxy serve [--port 8123] [--upstream URL] [--timeout SECS] [--config PATH]
-//!   glm-fix-proxy logs [--lines N] [--follow]
+//!   piglmbridger serve [--port 8123] [--upstream URL] [--timeout SECS] [--config PATH]
+//!   piglmbridger logs [--lines N] [--follow]
 //!
-//! 配置文件：~/.glm-fix-proxy/config.toml（优先级：CLI 参数 > 配置文件 > 默认值）
-//! 日志文件：~/.glm-fix-proxy/logs/proxy.log
+//! 配置文件：~/.piglmbridger/config.toml（优先级：CLI 参数 > 配置文件 > 默认值）
+//! 日志文件：~/.piglmbridger/logs/proxy.log
 
 mod logger;
 
@@ -43,7 +43,7 @@ impl Default for Config {
             port: 8123,
             upstream: "https://open.bigmodel.cn/api/paas/v4".into(),
             timeout_secs: 300,
-            log_dir: dirs_home().join(".glm-fix-proxy").join("logs"),
+            log_dir: dirs_home().join(".piglmbridger").join("logs"),
         }
     }
 }
@@ -54,7 +54,7 @@ fn dirs_home() -> PathBuf {
 
 impl Config {
     fn config_path() -> PathBuf {
-        dirs_home().join(".glm-fix-proxy").join("config.toml")
+        dirs_home().join(".piglmbridger").join("config.toml")
     }
 
     /// 读取配置文件；不存在则创建默认配置
@@ -75,7 +75,7 @@ impl Config {
         match toml::to_string_pretty(&cfg) {
             Ok(s) => {
                 let _ = std::fs::write(&path, format!(
-                    "# GLM fix proxy 配置文件（优先级：CLI 参数 > 此文件 > 内置默认值）\n{s}"
+                    "# piglmbridger 配置文件（优先级：CLI 参数 > 此文件 > 内置默认值）\n{s}"
                 ));
                 eprintln!("ℹ️  已生成默认配置文件: {}", path.display());
             }
@@ -86,7 +86,7 @@ impl Config {
 }
 
 #[derive(Parser)]
-#[command(name = "glm-fix-proxy", version, about = "GLM-5.3-Flash SSE 分片修复中转代理")]
+#[command(name = "piglmbridger", version, about = "GLM-5.3-Flash SSE 分片修复中转代理")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -150,11 +150,11 @@ async fn main() {
                     Logger::disabled()
                 }
             };
-            logger.info(&format!("GLM fix proxy 启动 http://127.0.0.1:{port}"));
-            eprintln!("GLM fix proxy listening on http://127.0.0.1:{port}");
+            logger.info(&format!("piglmbridger 启动 http://127.0.0.1:{port}"));
+            eprintln!("piglmbridger listening on http://127.0.0.1:{port}");
             eprintln!("upstream: {upstream}");
             eprintln!("log file: {}", cfg.log_dir.join("proxy.log").display());
-            eprintln!("另开终端可运行: glm-fix-proxy logs --follow 实时查看日志");
+            eprintln!("另开终端可运行: piglmbridger logs --follow 实时查看日志");
 
             let state = AppState {
                 client: reqwest::Client::builder()

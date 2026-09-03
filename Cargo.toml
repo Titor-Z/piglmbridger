@@ -1,5 +1,5 @@
 [package]
-name = "glm-fix-proxy"
+name = "piglmbridger"
 version = "0.1.0"
 edition = "2021"
 

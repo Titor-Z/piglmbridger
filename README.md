@@ -1,4 +1,9 @@
-# glm-fix-proxy — GLM-5.3-Flash SSE 分片修复中转代理
+# piglmbridger — Pi-Agent × GLM-5.3-Flash SSE 桥接器
+
+> 专为 Pi-Agent + GLM-5.3-Flash 打造的 Rust 代理桥接器：修复智谱 SSE 流式分片破碎引发的无限重试、输出截断问题。
+> 配合 pi 内置 `zai` provider 覆写 baseUrl，对接智谱国内 API（open.bigmodel.cn）。
+
+（原名 glm-fix-proxy，已更名为 piglmbridger；旧路径 `~/glm-fix-proxy`、`~/.glm-fix-proxy` 留有软链兼容。）
 
 pi Agent → 本地代理 (默认 `127.0.0.1:8123`) → 智谱 GLM API (`https://open.bigmodel.cn/api/paas/v4`)
 
@@ -14,29 +19,29 @@ pi Agent → 本地代理 (默认 `127.0.0.1:8123`) → 智谱 GLM API (`https:/
 ## 构建与运行
 
 ```bash
-cd ~/glm-fix-proxy
+cd ~/piglmbridger
 cargo build --release          # 首次编译较慢
-./target/release/glm-fix-proxy serve     # 用默认端口 8123
+./target/release/piglmbridger serve     # 用默认端口 8123
 ```
 
 ## 命令行用法
 
 ```
-glm-fix-proxy serve [--port 8123] [--upstream <url>] [--timeout <secs>]   # 默认子命令
-glm-fix-proxy logs [--lines N] [--follow]                                  # 查看/跟踪日志
-glm-fix-proxy --help
+piglmbridger serve [--port 8123] [--upstream <url>] [--timeout <secs>]   # 默认子命令
+piglmbridger logs [--lines N] [--follow]                                  # 查看/跟踪日志
+piglmbridger --help
 ```
 
 示例：
 
 ```bash
-glm-fix-proxy serve                       # 8123 / bigmodel / 300s 超时
-glm-fix-proxy serve --port 9999           # 换端口
-glm-fix-proxy serve --timeout 600         # 上游超时加到 600 秒
-glm-fix-proxy logs -f                      # 实时跟踪日志
+piglmbridger serve                       # 8123 / bigmodel / 300s 超时
+piglmbridger serve --port 9999           # 换端口
+piglmbridger serve --timeout 600         # 上游超时加到 600 秒
+piglmbridger logs -f                      # 实时跟踪日志
 ```
 
-## 配置文件：~/.glm-fix-proxy/config.toml
+## 配置文件：~/.piglmbridger/config.toml
 
 优先级：**CLI 参数 > 配置文件 > 内置默认值**。首次启动会自动生成默认配置，直接改端口/超时即可：
 
@@ -44,12 +49,12 @@ glm-fix-proxy logs -f                      # 实时跟踪日志
 port = 8123
 upstream = "https://open.bigmodel.cn/api/paas/v4"
 timeout_secs = 300
-log_dir = "/Users/<you>/.glm-fix-proxy/logs"
+log_dir = "/Users/<you>/.piglmbridger/logs"
 ```
 
 ## 日志
 
-- 文件：`~/.glm-fix-proxy/logs/proxy.log`（超过 10 MB 会自动轮转为 `proxy.log.1`）
+- 文件：`~/.piglmbridger/logs/proxy.log`（超过 10 MB 会自动轮转为 `proxy.log.1`）
 - 一条典型记录：
   ```
   [INFO ] [6f11b1] <- 200 OK SSE 流开始
@@ -58,7 +63,7 @@ log_dir = "/Users/<you>/.glm-fix-proxy/logs"
   ```
 - `done=false` + 丢弃残帧 → 上游曾把流砍断（GLM 已知坑），代理已安全兜住。
 
-## pi 侧接入（~/glm-fix-proxy 端口与扩展同步）
+## pi 侧接入（~/piglmbridger 端口与扩展同步）
 
 本仓库已附带 pi 侧接入资产（`pi/` 目录）：
 - [`pi/extensions/glm-proxy.ts`](pi/extensions/glm-proxy.ts) — 把内置 `zai` provider 的 baseUrl 指向本地代理
@@ -75,21 +80,21 @@ pi 用一个扩展把内置 `zai` provider 的 baseUrl 指到本地代理，端�
 
 | 控制端 | 位置 | 默认 |
 |---|---|---|
-| 配置文件 | `~/.glm-fix-proxy/config.toml` → `port` | 8123 |
+| 配置文件 | `~/.piglmbridger/config.toml` → `port` | 8123 |
 | CLI | `--port`（会覆盖配置文件） | — |
-| pi 扩展 | `~/.pi/agent/extensions/glm-proxy.ts` 里 `GLM_FIX_PROXY_PORT` 或 `DEFAULT_PORT` | 8123 |
+| pi 扩展 | `~/.pi/agent/extensions/glm-proxy.ts` 里 `PIGLMBRIDGER_PORT（旧名 GLM_FIX_PROXY_PORT 仍兼容）` 或 `DEFAULT_PORT` | 8123 |
 
 改端口时三处同步（例如改成 9999）：
 
 ```bash
 # 1) 配置文件（或直接 --port 9999 启动）
-sed -i '' 's/port = 8123/port = 9999/' ~/.glm-fix-proxy/config.toml
+sed -i '' 's/port = 8123/port = 9999/' ~/.piglmbridger/config.toml
 
 # 2) 启动代理
-./target/release/glm-fix-proxy serve
+./target/release/piglmbridger serve
 
 # 3) 改扩展端口并重启 pi
-#    设置环境变量：export GLM_FIX_PROXY_PORT=9999
+#    设置环境变量：export PIGLMBRIDGER_PORT（旧名 GLM_FIX_PROXY_PORT 仍兼容）=9999
 #    或修改 glm-proxy.ts 的 DEFAULT_PORT = 9999
 pi
 ```
@@ -100,7 +105,7 @@ pi 内步骤：`/login` 选 **zai** 填智谱 API Key → `/model` 选 **glm-5.3
 
 1. **看代理日志**，确认是不是上游截断：
    ```bash
-   ./target/release/glm-fix-proxy logs -f
+   ./target/release/piglmbridger logs -f
    ```
    - 有 `[ERROR] ... 残帧已丢弃` → 上游断流，代理已兜住；该次多半能正常结束。
    - 某条请求只有 `SSE 流开始`、没有 `流结束` → 说明客户端(pi)中途断开了该条 SSE，属客户端侧主动 abort。
