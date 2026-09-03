@@ -46,6 +46,13 @@ jobs:
         with:
           tool: cargo-zigbuild
 
+      # cargo-zigbuild 需要 zig 本体作为链接器
+      - name: Install zig
+        if: matrix.use-zigbuild
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
       - name: Install musl tools (linux x64)
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -56,6 +63,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
+        shell: bash
         run: |
           if [ "${{ matrix.use-zigbuild }}" = "true" ]; then
             cargo zigbuild --release --target ${{ matrix.target }}
