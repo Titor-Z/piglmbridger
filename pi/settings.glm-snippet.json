@@ -1,0 +1,21 @@
+{
+  "_说明": "GLM-5.3-Flash 推荐 pi 配置片段。只含与 GLM 相关的键；把需要的段合并进 ~/.pi/agent/settings.json（全局）或项目的 .pi/settings.json（项目级，嵌套键自动合并）。不要整份覆盖，避免冲掉你已有的 theme/模型偏好。",
+
+  "retry": {
+    "enabled": true,
+    "maxRetries": 1,
+    "baseDelayMs": 6000,
+    "provider": {
+      "timeoutMs": 120000,
+      "maxRetries": 0
+    }
+  },
+
+  "httpIdleTimeoutMs": 120000,
+
+  "modelThinkingLevels": {
+    "zai/glm-5.3-flash": "low",
+    "zai/glm-5.3": "low",
+    "zai/glm-5.3-highspeed": "low"
+  }
+}

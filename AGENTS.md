@@ -16,6 +16,7 @@
 > 给 GitHub Action 发 GitHub Release 时用的正文。按最新→最旧排列，HEAD 即下一个待发版内容。
 
 ### [Unreleased]
+- **新增**：仓库附带 pi 接入资产 `pi/` 目录（`pi/extensions/glm-proxy.ts` + `pi/settings.glm-snippet.json`），代理与 pi 侧配置一套交付；README 补安装说明。
 - **修复**【重要·根治间歇性断帧】：修正 agent SSE 行重组逻辑
   - 之前：某次上游网络块既含完整 `data:` 行、又含半截未写完的行时，默认其“整块无换行才等下一块”，导致半截 JSON 被当成完整帧下发给 pi → `Unterminated string in JSON` / 反复重试。
   - 现在：仅将真正以换行/空行收尾的片段下发给下游；未写完的尾部一律留缓冲，待下一块拼齐后再发；绝不伪造残缺帧。修复前触发场景约 60% 失败，修复后压测 14/14 通过。
@@ -81,7 +82,9 @@ pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai
 - [x] SSE 断流残帧丢弃逻辑（不伪造）。
 - [x] 单元测试 5/5 通过。
 - [x] 真实自测：修复前 5 次失败~3；修复后 14 次多工具任务 0 失败；更重的多步 Python + bash 任务干净完成，代理日志无 error。
+- [x] 仓库附带 pi 接入资产 `pi/`（扩展 + settings 片段）并写入 README 安装说明。
 - [x] README.md、AGENTS.md。
+- [x] git 初始化并提交检查点。
 
 ### 待办 / 下一步 🔜
 - [ ] python lib 之类引用的 code 文件 artifact 精确性由 agent 描述保证（本次 script.py 里被模型混入了它声称之外的 timestamp 行——是模型/提示词产物，不是代理 bug，如需可加例程剔除杂散行）。
@@ -129,7 +132,9 @@ GLM 官方约只有 payload 大体兼容；`tool_stream`、thinking 策略、分
 | 源码 | `~/glm-fix-proxy/src/main.rs`、`src/logger.rs` |
 | 配置 | `~/.glm-fix-proxy/config.toml` |
 | 日志 | `~/.glm-fix-proxy/logs/proxy.log`（logs -f 看） |
-| pi 扩展 | `~/.pi/agent/extensions/glm-proxy.ts` |
+| pi 扩展（本仓库参考版） | `pi/extensions/glm-proxy.ts` |
+| pi settings 片段（本仓库参考版） | `pi/settings.glm-snippet.json` |
+| pi 扩展（已安装） | `~/.pi/agent/extensions/glm-proxy.ts` |
 | pi settings | `~/.pi/agent/settings.json` |
 | 构建/测试 | `cargo build --release`、`cargo test` |
 | 运行 | `./target/release/glm-fix-proxy serve [--port]` |

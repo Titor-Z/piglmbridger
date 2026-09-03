@@ -60,6 +60,17 @@ log_dir = "/Users/<you>/.glm-fix-proxy/logs"
 
 ## pi 侧接入（~/glm-fix-proxy 端口与扩展同步）
 
+本仓库已附带 pi 侧接入资产（`pi/` 目录）：
+- [`pi/extensions/glm-proxy.ts`](pi/extensions/glm-proxy.ts) — 把内置 `zai` provider 的 baseUrl 指向本地代理
+- [`pi/settings.glm-snippet.json`](pi/settings.glm-snippet.json) — GLM 推荐配置**片段**（重试/超时/思考级别），按段合并进你的 settings.json，不要整份覆盖
+
+安装：
+```bash
+mkdir -p ~/.pi/agent/extensions
+cp pi/extensions/glm-proxy.ts ~/.pi/agent/extensions/
+# 然后把 pi/settings.glm-snippet.json 里需要的段合并进 ~/.pi/agent/settings.json
+```
+
 pi 用一个扩展把内置 `zai` provider 的 baseUrl 指到本地代理，端口两处要保持一致：
 
 | 控制端 | 位置 | 默认 |
