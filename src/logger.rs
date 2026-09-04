@@ -12,17 +12,24 @@ pub enum ColorMode {
     Never,  // 强制纯文本
 }
 
+#[derive(Clone, Copy, PartialEq, PartialOrd)]
+pub enum LogLevel {
+    Debug,
+    Info,
+}
+
 #[derive(Clone)]
 pub struct Logger {
     inner: Option<Arc<Mutex<File>>>,
     disabled: bool,
     file_only: bool, // daemon 模式：只写文件，不污染终端
     color: bool,
+    level: LogLevel,
 }
 
 impl Logger {
     /// 初始化：确保目录存在，轮转旧日志（proxy.log -> proxy.log.1，仅保留一份）
-    pub fn new_with_mode(log_dir: &Path, mode: ColorMode, file_only: bool) -> std::io::Result<Self> {
+    pub fn new_with_mode(log_dir: &Path, mode: ColorMode, file_only: bool, debug_on: bool) -> std::io::Result<Self> {
         std::fs::create_dir_all(log_dir)?;
         let file_path = log_dir.join("proxy.log");
         if file_path.exists() {
@@ -44,11 +51,12 @@ impl Logger {
             disabled: false,
             file_only,
             color,
+            level: if debug_on { LogLevel::Debug } else { LogLevel::Info },
         })
     }
 
     pub fn disabled() -> Self {
-        Self { inner: None, disabled: true, file_only: false, color: false }
+        Self { inner: None, disabled: true, file_only: false, color: false, level: LogLevel::Info }
     }
 
     fn write_line(&self, level: &str, msg: &str) {
@@ -76,6 +84,11 @@ impl Logger {
                 let _ = writeln!(f, "{ts} [{level:^5}] {msg}");
             }
         }
+    }
+
+    pub fn debug(&self, msg: &str) {
+        if self.disabled || self.level > LogLevel::Debug { return; }
+        self.write_line("DEBUG", msg);
     }
 
     pub fn info(&self, msg: &str) {

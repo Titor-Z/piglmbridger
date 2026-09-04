@@ -16,6 +16,7 @@
 > 给 GitHub Action 发 GitHub Release 时用的正文。按最新→最旧排列，HEAD 即下一个待发版内容。
 
 ### [Unreleased]
+- **新增**【v0.3.0 架构加固】：① 模型感知：仅 `glm-5.3*` SSE 归一化，其它模型字节级直通 ② 带内错误帧：断流/读空闲时丢残帧后补发标准 `error` 事件 + `[DONE]`（不是伪造数据帧）③ 取消透传：客户端断开经 NotifyDrop 实锤上游中止 ④ Header 白名单（仅 Authorization/Content-Type/Accept/User-Agent）⑤ `idle_timeout_secs` 读空闲看门狗（默认 120s）⑥ `auth_token` 远端令牌鉴权 ⑦ `--log-level debug` + `rejoined` 跨块拼接计数 ⑧ 区域/key 启动提醒 + doctor 401 提示。CI windows 首发再修一处（missing CommandExt import）。全 7 项均端到端实测通过（401 拦截、idle 触发错误帧、取消透传 debug、直通分支、白名单滤头）。
 - **新增**【CLI 大版本】：① 守护进程化 `start/stop/restart/status`（进程名 `piglmbridged`，pid 文件 + stale 清理 + 优雅退出最长等 30s）② `doctor` 体检子命令（配置/端口/上游探活）③ `--addr` 与代理端 env 通道（`PIGLMBRIDGER_ADDR`，优先级 CLI > env > config > 默认）④ 日志 TTY 自动着色（ERROR 红 / req_id 青色成组），管道自动纯文本，`--color` 可强制；修复 colorize 在中文行上的字节切片 panic（改 `get()` 安全切片，附单测）⑤ 退出时打印本次运行统计（请求数/残断次数/时长）。修复前端口占用直接 panic，现在输出可读错误并 exit(1)。
 - **CI**：新增 GitHub Actions 发布流水线（`.github/workflows/release.yml`）：推 `v*` tag 自动交叉编译 5 平台（macOS arm64/x64、Windows x64、Linux x64/arm64 musl 静态）并发布 Release；说明文字自动取自本文件 `[Unreleased]` 段。依赖前提：`reqwest` TLS 从 native-tls 切到 **rustls**（纯 Rust，消除 OpenSSL 交叉编译地狱）。
 - **更名**：项目 `glm-fix-proxy` → **`piglmbridger`**（二进制/包名/配置目录 `~/.piglmbridger` 同步更名；旧路径留软链兼容；env `PIGLMBRIDGER_PORT` 兼容旧 `GLM_FIX_PROXY_PORT`）。
@@ -93,6 +94,7 @@ pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai
 - [ ] python lib 之类引用的 code 文件 artifact 精确性由 agent 描述保证（本次 script.py 里被模型混入了它声称之外的 timestamp 行——是模型/提示词产物，不是代理 bug，如需可加例程剔除杂散行）。
 - [x] 守护进程化（piglmbridged）+ doctor + 颜色日志 + --addr（v0.2.0）。
 - [x] stats 统计子命令（stats.jsonl 落盘 + 汇总展示）；pi 扩展更名 piglmbridger.ts；LICENSE(MIT) + README 徽章 + 仓库转公开。
+- [x] v0.3.0 架构加固：模型感知/错误帧/取消透传/Header白名单/读空闲看门狗/令牌鉴权/log-level。
 - [ ] 可选：launchd / systemd 开机自启示例文档。
 - [ ] 可选：加更细粒度指标（每流字节数/耗时打进另一张表），方便灰度期观察。
 - [ ] 接入 GitHub Action 发布（workflow 已写好 `.github/workflows/release.yml`；待重启会话后本地验证 rustls 构建通过 + git commit + 推 tag 首发实测）。
@@ -134,7 +136,7 @@ GLM 官方约只有 payload 大体兼容；`tool_stream`、thinking 策略、分
 
 ### K08 — 跨平台 cfg 门控代码在本地永远编译不到 (⚠️ 发版必踩)
 `#[cfg(windows)]` 里的代码（如 `creation_flags` 缺 `CommandExt` 导入）在 mac 本地 `cargo check` 完全不报错，只有 Windows runner 能暴露。
-**纪律**：① 写了 cfg 门控分支后，推 tag 前至少跑一次 `cargo check --target x86_64-pc-windows-msvc`（或接受首发红一次、看日志秒修的节奏）；② CI 红了先 `gh api .../jobs/<id>/logs` 拉日志，错误都在最后几行。
+**纪律**：① 写了 cfg 门控分支后，尽量跑一次 `cargo check --target x86_64-pc-windows-msvc`。注意局限：`rustls`→`ring` 依赖含 C/asm，**从 mac 交叉到 windows 需要目标 C 工具链**，本地会因无 toolchain 在 `ring` 构建脚本处报错——那是环境限制，不是代码 bug；Windows 原生 CI 可正常编 ring。所以该预检主要用来抓“纯 Rust 代码”的 cfg 错误；带 ring 时仍需靠 windows runner 实跑。② CI 红了先 `gh api .../jobs/<id>/logs`（加 `--allow-escape-sequences`）拉日志，错误都在最后几行。
 
 ### K09 — 别用字节下标切片可能含中文的 String
 `&s[pos..pos+8]` 这种字节切片在多字节字符中间会直接 panic（`is not a char boundary`）。本次 colorize_req_ids 在中文日志行上就是被实测打中的。

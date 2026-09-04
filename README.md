@@ -24,7 +24,7 @@ cargo build --release          # 首次编译较慢
 ## 命令行用法
 
 ```
-piglmbridger serve [--addr 127.0.0.1] [--port 8123] [--upstream <url>] [--timeout <secs>] [--color auto|always|never]  # 前台
+piglmbridger serve [--addr 127.0.0.1] [--port 8123] [--upstream <url>] [--timeout <secs>] [--color auto|always|never] [--log-level info|debug]  # 前台
 piglmbridger start | stop | restart | status                              # 守护进程（进程名 piglmbridged）
 piglmbridger doctor [--api-key <key>]                                     # 体检：配置/端口/上游连通性
 piglmbridger logs [--lines N] [--follow]                                  # 查看/跟踪日志
@@ -67,10 +67,22 @@ piglmbridger logs -f                      # 实时跟踪日志
 
 ```toml
 port = 8123
+addr = "127.0.0.1"              # 0.0.0.0 = 对外开放（务必配好 auth_token！）
 upstream = "https://open.bigmodel.cn/api/paas/v4"
-timeout_secs = 300
+timeout_secs = 300              # 总超时
+idle_timeout_secs = 120         # 读空闲看门狗（GLM 长思考保护），0=禁用
+auth_token = ""                 # 远端令牌，非空则校验 Authorization: Bearer <token>
 log_dir = "/Users/<you>/.piglmbridger/logs"
 ```
+
+**架构说明（v0.3.0）**：
+- **模型感知**：仅 `glm-5.3*` 走 SSE 归一化（分片拼帧/过滤/错误帧）；其它模型字节级直通，零副作用。
+- **带内错误帧**：上游断流/读空闲时，先丢残帧，再补发标准 `data: {"error":{...}}` + `[DONE]`，pi 立即判定失败而非干等超时（不伪造数据帧）。
+- **取消透传**：客户端提前断开 → body 被 cancel → 上游随即中止（已 debug 日志实锤），不再白扣费用。
+- **Header 白名单**：只透传 Authorization/Content-Type/Accept/User-Agent。
+- **日志等级**：`serve --log-level debug` 看细节；终端彩色、管道纯文本。
+- **`重试`模式**：若配了 `auth_token`，未带/错令牌直接 401，不上游。
+
 
 ## 日志
 

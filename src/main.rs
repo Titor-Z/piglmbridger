@@ -38,12 +38,22 @@ struct Config {
     upstream: String,
     /// 上游请求超时（秒）
     timeout_secs: u64,
+    /// 读空闲超时（秒）：GLM 长思考期间无 token 输出的保护；0=禁用
+    #[serde(default = "default_idle")]
+    idle_timeout_secs: u64,
+    /// 远端部署令牌（空=不鉴权）；非空时要求 Authorization: Bearer <token>
+    #[serde(default)]
+    auth_token: String,
     /// 日志目录
     log_dir: PathBuf,
 }
 
 fn default_addr() -> String {
     "127.0.0.1".into()
+}
+
+fn default_idle() -> u64 {
+    120
 }
 
 fn pid_file() -> PathBuf {
@@ -57,6 +67,8 @@ impl Default for Config {
             addr: "127.0.0.1".into(),
             upstream: "https://open.bigmodel.cn/api/paas/v4".into(),
             timeout_secs: 300,
+            idle_timeout_secs: 120,
+            auth_token: String::new(),
             log_dir: dirs_home().join(".piglmbridger").join("logs"),
         }
     }
@@ -125,6 +137,9 @@ enum Command {
         /// 日志着色：auto | always | never
         #[arg(long, default_value = "auto")]
         color: String,
+        /// 日志等级：info | debug
+        #[arg(long, default_value = "info")]
+        log_level: String,
         /// 内部用：由 start 以守护进程方式拉起（隐藏）
         #[arg(long, hide = true)]
         daemon: bool,
@@ -182,6 +197,10 @@ struct AppState {
     total_dropped: Arc<std::sync::atomic::AtomicU64>,
     /// stats.jsonl 路径（每请求一行，供 stats 子命令汇总）
     stats_path: PathBuf,
+    /// 读空闲超时（秒），0=禁用
+    idle_secs: u64,
+    /// 远端令牌（空=不鉴权）
+    auth_token: String,
 }
 
 #[tokio::main]
@@ -195,6 +214,7 @@ async fn main() {
         upstream: None,
         timeout: None,
         color: "auto".into(),
+        log_level: "info".into(),
         daemon: false,
     }) {
         Command::Stats { days } => {
@@ -214,7 +234,7 @@ async fn main() {
         Command::Doctor { api_key } => {
             doctor::run(&config, api_key).await;
         }
-        Command::Serve { addr, port, upstream, timeout, color, daemon } => {
+        Command::Serve { addr, port, upstream, timeout, color, log_level, daemon } => {
             let cfg = config;
             let addr = addr.unwrap_or(cfg.addr.clone());
             let port = port.unwrap_or(cfg.port);
@@ -226,7 +246,8 @@ async fn main() {
                 _ => logger::ColorMode::Auto,
             };
 
-            let logger = match Logger::new_with_mode(&cfg.log_dir, color_mode, daemon) {
+            let debug_on = log_level == "debug";
+            let logger = match Logger::new_with_mode(&cfg.log_dir, color_mode, daemon, debug_on) {
                 Ok(l) => l,
                 Err(e) => {
                     eprintln!("⚠️  日志初始化失败: {e}，仅输出到终端");
@@ -240,6 +261,9 @@ async fn main() {
                 format!("{addr}:{port}")
             };
             logger.info(&format!("piglmbridger{} 启动 http://{bind}", if daemon { "d" } else { "" }));
+            if upstream.contains("bigmodel.cn") {
+                logger.info("上游是国内站 open.bigmodel.cn —— 请确认你的 key 来自智谱国内平台（与 api.z.ai 国际站不互通；401 时先怀疑这一点）");
+            }
             if !daemon {
                 eprintln!("piglmbridger listening on http://{bind}");
                 eprintln!("upstream: {upstream}");
@@ -259,6 +283,8 @@ async fn main() {
                 total_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 total_dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 stats_path: cfg.log_dir.join("stats.jsonl"),
+                idle_secs: cfg.idle_timeout_secs,
+                auth_token: cfg.auth_token.clone(),
             };
 
             if daemon {
@@ -559,6 +585,42 @@ mod doctor {
     }
 }
 
+/// 包裹下发流：Drop 时能感知"下游提前断开"（K05 盲区的观测面）。
+/// 正常完成时 finished 已置位，不误报。
+struct NotifyDrop<S> {
+    inner: std::pin::Pin<Box<S>>,
+    logger: Logger,
+    req_id: String,
+    finished: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<S: futures_util::Stream> futures_util::Stream for NotifyDrop<S> {
+    type Item = S::Item;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.get_mut().inner.as_mut().poll_next(cx)
+    }
+}
+
+impl<S> Drop for NotifyDrop<S> {
+    fn drop(&mut self) {
+        if !self.finished.load(std::sync::atomic::Ordering::Relaxed) {
+            self.logger.debug(&format!(
+                "[{}] 客户端提前断开：body 被 cancel，上游请求已随之中止（取消透传生效）",
+                self.req_id
+            ));
+        }
+    }
+}
+
+impl<S> NotifyDrop<S> {
+    fn new(inner: S, logger: Logger, req_id: String, finished: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self { inner: Box::pin(inner), logger, req_id, finished }
+    }
+}
+
 /// 逐字节喂入原始数据，产出规整后的 SSE 行。
 struct SseNormalizer {
     buffer: Vec<u8>,
@@ -567,16 +629,21 @@ struct SseNormalizer {
     dropped: u64,
     /// 统计：成功下发的行数
     emitted: u64,
+    /// 统计：跨块拼接后才发出的行数（分片缓冲命中）
+    rejoined: u64,
+    /// 上一轮是否留下了残尾（用于 rejoined 计数）
+    had_partial: bool,
 }
 
 impl SseNormalizer {
     fn new() -> Self {
-        Self { buffer: Vec::new(), done_seen: false, dropped: 0, emitted: 0 }
+        Self { buffer: Vec::new(), done_seen: false, dropped: 0, emitted: 0, rejoined: 0, had_partial: false }
     }
 
     fn push(&mut self, chunk: &[u8]) -> Vec<String> {
         self.buffer.extend_from_slice(chunk);
         let mut lines = Vec::new();
+        let is_continuation = self.had_partial;
 
         // 逐字节窗口处理；每轮回先把能从合法 UTF-8 边界切开的部分取走。
         while let Some(valid_len) = valid_utf8_prefix_len(&self.buffer) {
@@ -595,20 +662,42 @@ impl SseNormalizer {
                     // 残缺尾行（不带换行收尾）：放回缓冲，绝不当下发。
                     let back = line.as_bytes().to_vec();
                     self.buffer.splice(0..0, back);
+                    self.had_partial = true;
                     break;
                 }
                 let trimmed = line.trim_end_matches('\r');
                 if !trimmed.is_empty() {
+                    if is_continuation || self.had_partial {
+                        self.rejoined += 1;
+                    }
                     if let Some(norm) = self.normalize_line(trimmed) {
                         lines.push(norm);
                     }
                 }
+            }
+            if self.buffer.is_empty() {
+                self.had_partial = false;
             }
             if !ends_nl {
                 break;
             }
         }
         lines
+    }
+
+    /// 带内错误帧：流异常时给下游一条标准 SSE error 事件 + [DONE]，
+    /// 让 pi 立即走失败/重试路径，而不是干等到自身超时。
+    /// 注意：这不是伪造数据帧（数据帧绝不伪造），是显式的失败信号。
+    fn error_frame(&self, message: &str) -> Vec<u8> {
+        let payload = json!({
+            "error": {
+                "message": message,
+                "type": "proxy_upstream_error",
+                "proxy": "piglmbridger",
+            }
+        });
+        let out = format!("data: {payload}\n\ndata: [DONE]\n\n").into_bytes();
+        out
     }
 
     fn normalize_line(&mut self, line: &str) -> Option<String> {
@@ -727,14 +816,42 @@ async fn passthrough_inner(
     req_id: String,
     start: std::time::Instant,
 ) -> Response {
+    // 远端令牌鉴权（auth_token 配置非空时启用）
+    if !state.auth_token.is_empty() {
+        let provided = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if provided != format!("Bearer {}", state.auth_token) {
+            state.logger.error(&format!("[{req_id}] 令牌校验失败，拒绝转发"));
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(json!({"error": {"message": "invalid or missing proxy token", "type": "proxy_auth"}})),
+            ).into_response();
+        }
+    }
+
+    // 模型感知：仅 glm-5.3* 走 SSE 归一化，其余模型字节级直通
+    let model = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()));
+    let normalize = match &model {
+        Some(m) => m.starts_with("glm-5.3"),
+        None => false, // 解析失败按不透明字节处理
+    };
+    state.logger.debug(&format!("[{req_id}] model={:?} normalize={}", model, normalize));
+
     let url = format!("{}{}", state.upstream.trim_end_matches('/'), uri.path());
     let mut req = state.client.post(&url).body(body);
+    // Header 白名单：只放行鉴权与内容协商相关头部，其余一律丢弃
+    const ALLOWED: [&str; 4] = ["authorization", "content-type", "accept", "user-agent"];
     for (k, v) in headers.iter() {
         let name = k.as_str();
-        if matches!(name, "host" | "content-length" | "connection" | "accept-encoding") {
-            continue;
+        if ALLOWED.contains(&name) {
+            req = req.header(name, v);
+        } else if !matches!(name, "host" | "content-length" | "connection" | "accept-encoding") {
+            state.logger.debug(&format!("[{req_id}] 滤除头: {name}"));
         }
-        req = req.header(name, v);
     }
 
     state.logger.info(&format!("[{req_id}] -> POST {} 转发至 {url}", uri.path()));
@@ -757,22 +874,49 @@ async fn passthrough_inner(
                 .unwrap_or("")
                 .to_string();
 
-            if content_type.contains("text/event-stream") {
+            if content_type.contains("text/event-stream") && normalize {
                 state.logger.info(&format!(
                     "[{req_id}] <- {status} SSE 流开始"
                 ));
                 let logger = state.logger.clone();
                 let req_id2 = req_id.clone();
+                let token = tokio_util::sync::CancellationToken::new();
+                let token2 = token.clone();
+                let idle = state.idle_secs;
                 let upstream_stream = resp.bytes_stream();
-                let body_stream = futures_util::stream::unfold(
-                    (upstream_stream, SseNormalizer::new(), false, logger, req_id2, state.total_dropped.clone()),
-                    move |(mut stream, mut norm, mut done, logger, req_id, total_dropped)| async move {
+                let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let finished_for_unfold = finished.clone();
+                let finished_for_drop = finished.clone();
+                let logger_for_drop = logger.clone();
+                let req_id_for_drop = req_id.clone();
+                let body_stream = NotifyDrop::new(
+                    futures_util::stream::unfold(
+                    (upstream_stream, SseNormalizer::new(), false, logger, req_id2, state.total_dropped.clone(), token2, idle, finished_for_unfold),
+                    move |(mut stream, mut norm, mut done, logger, req_id, total_dropped, token, idle, finished2)| async move {
                         if done {
                             return None;
                         }
                         loop {
-                            match stream.next().await {
-                                Some(Ok(chunk)) => {
+                            // 读空闲看门狗：GLM 长思考可能几十秒无输出；0=禁用
+                            let next = if idle > 0 {
+                                tokio::time::timeout(Duration::from_secs(idle), stream.next()).await
+                            } else {
+                                Ok(stream.next().await)
+                            };
+                            match next {
+                                Err(_elapsed) => {
+                                    let m = format!("读空闲 {idle}s 无数据，主动中止上游（疑似链路静默断开）");
+                                    logger.error(&format!("[{req_id}] {m}"));
+                                    let _ = norm.drain_abrupt();
+                                    total_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    // 带内错误帧：让 pi 立即判定失败，而不是干等到自身超时
+                                    let out = norm.error_frame(&m);
+                                    return Some((
+                                        Ok::<_, std::io::Error>(bytes::Bytes::from(out)),
+                                        (stream, norm, true, logger, req_id, total_dropped, token, idle, finished2),
+                                    ));
+                                }
+                                Ok(Some(Ok(chunk))) => {
                                     let lines = norm.push(&chunk);
                                     if norm.done_seen {
                                         done = true;
@@ -786,39 +930,59 @@ async fn passthrough_inner(
                                         }
                                         return Some((
                                             Ok::<_, std::io::Error>(bytes::Bytes::from(out)),
-                                            (stream, norm, done, logger, req_id, total_dropped),
+                                            (stream, norm, done, logger, req_id, total_dropped, token, idle, finished2),
                                         ));
                                     }
                                 }
-                                Some(Err(e)) => {
+                                Ok(Some(Err(e))) => {
                                     logger.error(&format!("[{req_id}] 上游流错误: {e}"));
                                     return Some((
                                         Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
-                                        (stream, norm, true, logger, req_id, total_dropped),
+                                        (stream, norm, true, logger, req_id, total_dropped, token, idle, finished2),
                                     ));
                                 }
-                                None => {
+                                Ok(None) => {
                                     // 流到此结束。正常情况下内容行在各自换行时已即时下发，
                                     // done_seen=true（收到过 [DONE]）。若 buffer 里仍有残留，
                                     // 说明是上游异常切断的半截帧 → 丢弃，绝不伪造完整 frame。
                                     let info = norm.drain_abrupt();
+                                    let mut abnormal = false;
                                     if let Some(m) = info {
                                         logger.error(&format!("[{req_id}] {m}"));
                                         total_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        abnormal = true;
+                                    }
+                                    // 带内错误帧：HTTP 已 200 无法改状态码，用标准 error 事件告知下游
+                                    let mut out: Vec<u8> = Vec::new();
+                                    if abnormal && !norm.done_seen {
+                                        out.extend_from_slice(&norm.error_frame("upstream stream terminated prematurely"));
                                     }
                                     logger.info(&format!(
-                                        "[{req_id}] SSE 流结束(done={})，规整下发 {} 行，丢弃 {} 个无效帧，耗时 {:.2}s",
+                                        "[{req_id}] SSE 流结束(done={})，规整下发 {} 行（跨块拼接 {} 行），丢弃 {} 个无效帧，耗时 {:.2}s",
                                         norm.done_seen,
                                         norm.emitted,
+                                        norm.rejoined,
                                         norm.dropped,
                                         start.elapsed().as_secs_f32()
                                     ));
-                                    return None;
+                                    finished2.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    if out.is_empty() {
+                                        return None;
+                                    }
+                                    return Some((
+                                        Ok::<_, std::io::Error>(bytes::Bytes::from(out)),
+                                        (stream, norm, true, logger, req_id, total_dropped, token, idle, finished2),
+                                    ));
                                 }
                             }
                         }
                     },
+                    ),
+                    logger_for_drop,
+                    req_id_for_drop,
+                    finished_for_drop,
                 );
+                let _ = token; // Drop 守卫负责取消透传（见 NotifyDrop::drop）
 
                 let mut resp = Response::new(Body::from_stream(body_stream));
                 *resp.status_mut() = status;
@@ -829,6 +993,15 @@ async fn passthrough_inner(
                         "content-type",
                         "text/event-stream".parse().unwrap(),
                     );
+                }
+                resp
+            } else if content_type.contains("text/event-stream") {
+                // 其他模型 / 未识别 body：SSE 字节级直通，零缓冲零过滤
+                state.logger.info(&format!("[{req_id}] <- {status} SSE 直通（非 glm-5.3，不归一化）"));
+                let mut resp = Response::new(Body::from_stream(resp.bytes_stream()));
+                *resp.status_mut() = status;
+                if let Some(ct) = out_headers.remove("content-type") {
+                    resp.headers_mut().insert("content-type", ct);
                 }
                 resp
             } else {
@@ -946,7 +1119,7 @@ fn print_stats(path: &PathBuf, days: u32) {
     let mut max_ms: u128 = 0;
     for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-        if let Some(c) = cutoff {
+        if let Some(_c) = cutoff {
             let ts = v["ts"].as_str().unwrap_or("");
             match chrono::DateTime::parse_from_rfc3339(ts) {
                 Ok(t) if t < cutoff.unwrap() => continue,
