@@ -393,6 +393,7 @@ mod daemon {
         }
         #[cfg(windows)]
         {
+            use std::os::windows::process::CommandExt;
             const DETACHED_PROCESS: u32 = 0x0000_0008;
             cmd.creation_flags(DETACHED_PROCESS);
         }
