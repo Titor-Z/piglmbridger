@@ -20,10 +20,33 @@ cargo build --release          # 首次编译较慢
 ## 命令行用法
 
 ```
-piglmbridger serve [--port 8123] [--upstream <url>] [--timeout <secs>]   # 默认子命令
+piglmbridger serve [--addr 127.0.0.1] [--port 8123] [--upstream <url>] [--timeout <secs>] [--color auto|always|never]  # 前台
+piglmbridger start | stop | restart | status                              # 守护进程（进程名 piglmbridged）
+piglmbridger doctor [--api-key <key>]                                     # 体检：配置/端口/上游连通性
 piglmbridger logs [--lines N] [--follow]                                  # 查看/跟踪日志
 piglmbridger --help
 ```
+
+### 守护进程（推荐日常使用）
+
+```bash
+piglmbridger start    # 后台启动，进程名 piglmbridged，pid 写入 ~/.piglmbridger/piglmbridged.pid
+piglmbridger status   # 运行状态 + 端口可达性
+piglmbridger stop     # 优雅退出（SIGTERM，等在途流收尾最长 30s，超时 SIGKILL）
+piglmbridger restart
+```
+
+### 体检
+
+```bash
+piglmbridger doctor                # 配置校验 + 端口占用 + 上游连通性（401=可达属预期）
+piglmbridger doctor --api-key sk-… # 带真实 key 探活（验证 key 与模型可用性）
+```
+
+### 日志颜色
+
+终端下自动着色（ERROR 红、req_id 青色成组）；接管道时自动退回纯文本，`logs -f | grep <req_id>` 干净可用。`--color always|never` 可强制。
+
 
 示例：
 

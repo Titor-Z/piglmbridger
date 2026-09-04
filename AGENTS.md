@@ -16,6 +16,7 @@
 > 给 GitHub Action 发 GitHub Release 时用的正文。按最新→最旧排列，HEAD 即下一个待发版内容。
 
 ### [Unreleased]
+- **新增**【CLI 大版本】：① 守护进程化 `start/stop/restart/status`（进程名 `piglmbridged`，pid 文件 + stale 清理 + 优雅退出最长等 30s）② `doctor` 体检子命令（配置/端口/上游探活）③ `--addr` 与代理端 env 通道（`PIGLMBRIDGER_ADDR`，优先级 CLI > env > config > 默认）④ 日志 TTY 自动着色（ERROR 红 / req_id 青色成组），管道自动纯文本，`--color` 可强制；修复 colorize 在中文行上的字节切片 panic（改 `get()` 安全切片，附单测）⑤ 退出时打印本次运行统计（请求数/残断次数/时长）。修复前端口占用直接 panic，现在输出可读错误并 exit(1)。
 - **CI**：新增 GitHub Actions 发布流水线（`.github/workflows/release.yml`）：推 `v*` tag 自动交叉编译 5 平台（macOS arm64/x64、Windows x64、Linux x64/arm64 musl 静态）并发布 Release；说明文字自动取自本文件 `[Unreleased]` 段。依赖前提：`reqwest` TLS 从 native-tls 切到 **rustls**（纯 Rust，消除 OpenSSL 交叉编译地狱）。
 - **更名**：项目 `glm-fix-proxy` → **`piglmbridger`**（二进制/包名/配置目录 `~/.piglmbridger` 同步更名；旧路径留软链兼容；env `PIGLMBRIDGER_PORT` 兼容旧 `GLM_FIX_PROXY_PORT`）。
 - **新增**：仓库附带 pi 接入资产 `pi/` 目录（`pi/extensions/glm-proxy.ts` + `pi/settings.glm-snippet.json`），代理与 pi 侧配置一套交付；README 补安装说明。
@@ -90,7 +91,8 @@ pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai
 
 ### 待办 / 下一步 🔜
 - [ ] python lib 之类引用的 code 文件 artifact 精确性由 agent 描述保证（本次 script.py 里被模型混入了它声称之外的 timestamp 行——是模型/提示词产物，不是代理 bug，如需可加例程剔除杂散行）。
-- [ ] 可选：把代理注册成 launchd / systemd 服务开机自启。
+- [x] 守护进程化（piglmbridged）+ doctor + 颜色日志 + --addr（v0.2.0）。
+- [ ] 可选：launchd / systemd 开机自启示例文档。
 - [ ] 可选：加更细粒度指标（每流字节数/耗时打进另一张表），方便灰度期观察。
 - [ ] 接入 GitHub Action 发布（workflow 已写好 `.github/workflows/release.yml`；待重启会话后本地验证 rustls 构建通过 + git commit + 推 tag 首发实测）。
 - [ ] 确认 .git / CI 接入；规划 GitHub Action 用 AGENTS.md「更新日志」生成 Release。（workflow 已就绪，待验证）

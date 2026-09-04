@@ -20,6 +20,8 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::sync::Arc;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -29,6 +31,9 @@ use logger::Logger;
 struct Config {
     /// 监听端口
     port: u16,
+    /// 监听地址（IP），默认仅本机
+    #[serde(default = "default_addr")]
+    addr: String,
     /// 上游 API 地址
     upstream: String,
     /// 上游请求超时（秒）
@@ -37,10 +42,19 @@ struct Config {
     log_dir: PathBuf,
 }
 
+fn default_addr() -> String {
+    "127.0.0.1".into()
+}
+
+fn pid_file() -> PathBuf {
+    dirs_home().join(".piglmbridger").join("piglmbridged.pid")
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             port: 8123,
+            addr: "127.0.0.1".into(),
             upstream: "https://open.bigmodel.cn/api/paas/v4".into(),
             timeout_secs: 300,
             log_dir: dirs_home().join(".piglmbridger").join("logs"),
@@ -94,8 +108,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 启动代理（默认子命令）
+    /// 启动代理（前台；默认子命令）
     Serve {
+        /// 覆盖监听地址（IP，如 0.0.0.0）
+        #[arg(long)]
+        addr: Option<String>,
         /// 覆盖监听端口
         #[arg(long)]
         port: Option<u16>,
@@ -105,6 +122,36 @@ enum Command {
         /// 覆盖上游超时（秒）
         #[arg(long)]
         timeout: Option<u64>,
+        /// 日志着色：auto | always | never
+        #[arg(long, default_value = "auto")]
+        color: String,
+        /// 内部用：由 start 以守护进程方式拉起（隐藏）
+        #[arg(long, hide = true)]
+        daemon: bool,
+    },
+    /// 后台守护进程方式启动（进程名 piglmbridged）
+    Start {
+        #[arg(long)]
+        addr: Option<String>,
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// 停止守护进程（优雅退出，最长等 30s，超时 SIGKILL）
+    Stop,
+    /// 重启守护进程
+    Restart {
+        #[arg(long)]
+        addr: Option<String>,
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// 查看守护进程状态
+    Status,
+    /// 体检：配置校验 / 端口占用 / 上游连通性
+    Doctor {
+        /// 可选：用于真实探活的智谱 API Key（不传则仅连通性检查）
+        #[arg(long)]
+        api_key: Option<String>,
     },
     /// 查看代理日志
     Logs {
@@ -122,6 +169,11 @@ struct AppState {
     client: reqwest::Client,
     upstream: String,
     logger: Logger,
+    /// 在途请求数（优雅退出时等待收尾）
+    inflight: Arc<std::sync::atomic::AtomicU64>,
+    /// 进程级累计统计
+    total_requests: Arc<std::sync::atomic::AtomicU64>,
+    total_dropped: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[tokio::main]
@@ -130,31 +182,59 @@ async fn main() {
     let config = Config::load();
 
     match cli.command.unwrap_or(Command::Serve {
+        addr: None,
         port: None,
         upstream: None,
         timeout: None,
+        color: "auto".into(),
+        daemon: false,
     }) {
         Command::Logs { lines, follow } => {
             logger::view_logs(&config.log_dir.join("proxy.log"), lines, follow);
         }
-        Command::Serve { port, upstream, timeout } => {
+        Command::Start { addr, port } => daemon::start(addr, port),
+        Command::Stop => daemon::stop(),
+        Command::Restart { addr, port } => {
+            daemon::stop();
+            std::thread::sleep(Duration::from_millis(500));
+            daemon::start(addr, port);
+        }
+        Command::Status => daemon::status(),
+        Command::Doctor { api_key } => {
+            doctor::run(&config, api_key).await;
+        }
+        Command::Serve { addr, port, upstream, timeout, color, daemon } => {
             let cfg = config;
+            let addr = addr.unwrap_or(cfg.addr.clone());
             let port = port.unwrap_or(cfg.port);
             let upstream = upstream.unwrap_or(cfg.upstream);
             let timeout_secs = timeout.unwrap_or(cfg.timeout_secs);
+            let color_mode = match color.as_str() {
+                "always" => logger::ColorMode::Always,
+                "never" => logger::ColorMode::Never,
+                _ => logger::ColorMode::Auto,
+            };
 
-            let logger = match Logger::new(&cfg.log_dir) {
+            let logger = match Logger::new_with_mode(&cfg.log_dir, color_mode, daemon) {
                 Ok(l) => l,
                 Err(e) => {
                     eprintln!("⚠️  日志初始化失败: {e}，仅输出到终端");
                     Logger::disabled()
                 }
             };
-            logger.info(&format!("piglmbridger 启动 http://127.0.0.1:{port}"));
-            eprintln!("piglmbridger listening on http://127.0.0.1:{port}");
-            eprintln!("upstream: {upstream}");
-            eprintln!("log file: {}", cfg.log_dir.join("proxy.log").display());
-            eprintln!("另开终端可运行: piglmbridger logs --follow 实时查看日志");
+
+            let bind = if addr.contains(':') {
+                addr.clone()
+            } else {
+                format!("{addr}:{port}")
+            };
+            logger.info(&format!("piglmbridger{} 启动 http://{bind}", if daemon { "d" } else { "" }));
+            if !daemon {
+                eprintln!("piglmbridger listening on http://{bind}");
+                eprintln!("upstream: {upstream}");
+                eprintln!("log file: {}", cfg.log_dir.join("proxy.log").display());
+                eprintln!("另开终端可运行: piglmbridger logs --follow 实时查看日志");
+            }
 
             let state = AppState {
                 client: reqwest::Client::builder()
@@ -163,19 +243,306 @@ async fn main() {
                     .build()
                     .expect("failed to build http client"),
                 upstream,
-                logger,
+                logger: logger.clone(),
+                inflight: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                total_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                total_dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             };
+
+            if daemon {
+                // 守护进程模式：写 pid 文件
+                let _ = std::fs::write(pid_file(), std::process::id().to_string());
+            }
 
             let app = Router::new()
                 .route("/chat/completions", post(passthrough))
                 .fallback(passthrough)
                 .with_state(state.clone());
 
-            let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-                .await
-                .expect("failed to bind");
-            axum::serve(listener, app).await.unwrap();
+            let listener = match tokio::net::TcpListener::bind(&bind).await {
+                Ok(l) => l,
+                Err(e) => {
+                    let msg = format!(
+                        "监听 {bind} 失败: {e}（端口被占用？试试 --port 换端口，或 piglmbridger status 查看已有实例）"
+                    );
+                    eprintln!("{msg}");
+                    logger.error(&msg);
+                    std::process::exit(1);
+                }
+            };
+
+            let start_time = std::time::Instant::now();
+            let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal(state.clone()));
+            if let Err(e) = server.await {
+                logger.error(&format!("server error: {e}"));
+            }
+            // 收尾统计
+            logger.info(&format!(
+                "piglmbridger 退出：本次运行 {:.0}s，共 {} 个请求（其中上游残断 {} 次）",
+                start_time.elapsed().as_secs_f32(),
+                state.total_requests.load(std::sync::atomic::Ordering::Relaxed),
+                state.total_dropped.load(std::sync::atomic::Ordering::Relaxed),
+            ));
+            if daemon {
+                let _ = std::fs::remove_file(pid_file());
+            }
         }
+    }
+}
+
+/// 优雅退出信号：Ctrl+C 或 SIGTERM；日志提示在途流等待
+async fn shutdown_signal(state: AppState) {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    let n = state.inflight.load(std::sync::atomic::Ordering::Relaxed);
+    if n > 0 {
+        state.logger.info(&format!(
+            "收到退出信号，等待 {n} 个在途流收尾（最长 30s）…"
+        ));
+        // 等在途流归零，最长 30s
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while state.inflight.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            if std::time::Instant::now() > deadline {
+                state.logger.warn("等待超时，强制退出（在途流可能被中断）".to_string());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    } else {
+        state.logger.info("收到退出信号，无在途流，直接退出".into());
+    }
+}
+
+mod daemon {
+    use super::*;
+
+    fn is_alive(pid: u32) -> bool {
+        #[cfg(unix)]
+        {
+            // kill -0 探活
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            std::path::Path::new(&format!("/proc/{pid}")).exists()
+        }
+    }
+
+    fn read_pid() -> Option<u32> {
+        let raw = std::fs::read_to_string(pid_file()).ok()?;
+        raw.trim().parse().ok()
+    }
+
+    pub fn start(addr: Option<String>, port: Option<u16>) {
+        // 已有实例？
+        if let Some(pid) = read_pid() {
+            if is_alive(pid) {
+                eprintln!("❌ 已有实例在运行（pid {pid}）。如需重启：piglmbridger restart");
+                std::process::exit(1);
+            }
+            let _ = std::fs::remove_file(pid_file()); // stale pid 清理
+        }
+
+        let exe = std::env::current_exe().expect("cannot locate current exe");
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.args(["serve", "--daemon"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.arg0("piglmbridged"); // 进程名呈 piglmbridged
+        }
+        if let Some(a) = addr {
+            cmd.args(["--addr", &a]);
+        }
+        if let Some(p) = port {
+            cmd.args(["--port", &p.to_string()]);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // 完全脱离终端会话
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc_setsid();
+                    Ok(())
+                });
+            }
+        }
+        #[cfg(windows)]
+        {
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            cmd.creation_flags(DETACHED_PROCESS);
+        }
+
+        match cmd.spawn() {
+            Ok(child) => {
+                eprintln!("✅ piglmbridged 已后台启动 (pid {})，日志: {}", child.id(), Config::load().log_dir.join("proxy.log").display());
+                eprintln!("   查看状态: piglmbridger status | 实时日志: piglmbridger logs -f");
+            }
+            Err(e) => {
+                eprintln!("❌ 启动失败: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn libc_setsid() {
+        // setsid(2)：脱离控制终端；直接用系统调用，避免引入 libc crate
+        unsafe extern "C" {
+            fn setsid() -> i32;
+        }
+        unsafe {
+            setsid();
+        }
+    }
+
+    pub fn stop() {
+        let Some(pid) = read_pid() else {
+            eprintln!("ℹ️  没有正在运行的 piglmbridged（无 pid 文件）");
+            return;
+        };
+        if !is_alive(pid) {
+            eprintln!("ℹ️  pid {pid} 已不存在，清理 stale pid 文件");
+            let _ = std::fs::remove_file(pid_file());
+            return;
+        }
+        eprint!("⏳ 向 piglmbridged (pid {pid}) 发送 SIGTERM，等待优雅退出…");
+        #[cfg(unix)]
+        let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        #[cfg(not(unix))]
+        let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string()]).status();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while is_alive(pid) {
+            if std::time::Instant::now() > deadline {
+                eprintln!("\n⚠️  30s 未退出，强制 SIGKILL");
+                #[cfg(unix)]
+                let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            eprint!(".");
+        }
+        let _ = std::fs::remove_file(pid_file());
+        eprintln!("\n✅ 已停止");
+    }
+
+    pub fn status() {
+        match read_pid() {
+            Some(pid) if is_alive(pid) => {
+                eprintln!("✅ piglmbridged 运行中 (pid {pid})");
+            }
+            Some(pid) => {
+                eprintln!("⚠️  pid 文件存在但进程 {pid} 已死（stale），运行 piglmbridger start 重新启动");
+            }
+            None => eprintln!("⛔ piglmbridged 未运行"),
+        }
+        let cfg = Config::load();
+        let bind = format!("{}:{}", cfg.addr, cfg.port);
+        match std::net::TcpStream::connect(&bind) {
+            Ok(_) => eprintln!("✅ 端口 {bind} 可达"),
+            Err(_) => eprintln!("⛔ 端口 {bind} 不可达（未监听）"),
+        }
+    }
+}
+
+mod doctor {
+    use super::*;
+
+    pub async fn run(cfg: &Config, api_key: Option<String>) {
+        let mut ok = true;
+        println!("piglmbridger doctor\n==================");
+
+        // 1) 配置文件
+        println!("\n[1/3] 配置文件: {:?}", Config::config_path());
+        println!("      port={} addr={} timeout={}s", cfg.port, cfg.addr, cfg.timeout_secs);
+        let log_ok = cfg.log_dir.is_dir() || std::fs::create_dir_all(&cfg.log_dir).is_ok();
+        println!("      日志目录可写: {}", mark(log_ok));
+        ok &= log_ok;
+
+        // 2) 端口占用
+        let bind = format!("{}:{}", cfg.addr, cfg.port);
+        println!("\n[2/3] 监听端口 {bind}:");
+        match std::net::TcpStream::connect(&bind) {
+            Ok(_) => {
+                println!("      已有服务在监听: {}（若非本代理请换端口）", mark(true));
+                println!("      提示: piglmbridger status 可确认是否为本代理实例");
+            }
+            Err(_) => println!("      空闲: {}", mark(true)),
+        }
+
+        // 3) 上游连通性
+        println!("\n[3/3] 上游 {}: ", cfg.upstream);
+        let url = format!("{}/chat/completions", cfg.upstream.trim_end_matches('/'));
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                println!("      客户端构建失败: {e} {}", mark(false));
+                return;
+            }
+        };
+        let mut req = client.post(&url).json(&json!({
+            "model": "glm-5.3-flash",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }));
+        if let Some(k) = &api_key {
+            req = req.bearer_auth(k);
+        }
+        match req.send().await {
+            Ok(resp) => {
+                let st = resp.status().as_u16();
+                match (st, api_key.is_some()) {
+                    (200, _) => println!("      {st} ✓ 探活成功（key 有效，模型可用） {}", mark(true)),
+                    (401, false) => println!("      {st} ✓ 网络可达（未带 key，被要求鉴权属预期） {}", mark(true)),
+                    (401, true) => {
+                        println!("      {st} ✗ key 被拒绝 {}", mark(false));
+                        ok = false;
+                    }
+                    (s, _) => {
+                        println!("      {s} ✗ 异常响应 {}", mark(false));
+                        ok = false;
+                    }
+                }
+            }
+            Err(e) => {
+                println!("      连接失败: {e} {}", mark(false));
+                ok = false;
+            }
+        }
+
+        println!("\n结论: {}", if ok { "✅ 全部通过" } else { "⚠️  有问题，见上" });
+    }
+
+    fn mark(b: bool) -> &'static str {
+        if b { "✅" } else { "❌" }
     }
 }
 
@@ -321,6 +688,22 @@ async fn passthrough(
         s
     };
 
+    state.inflight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.total_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let result = passthrough_inner(state.clone(), uri, headers, body, req_id, start).await;
+    state.inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    result
+}
+
+async fn passthrough_inner(
+    state: AppState,
+    uri: Uri,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+    req_id: String,
+    start: std::time::Instant,
+) -> Response {
     let url = format!("{}{}", state.upstream.trim_end_matches('/'), uri.path());
     let mut req = state.client.post(&url).body(body);
     for (k, v) in headers.iter() {
@@ -359,8 +742,8 @@ async fn passthrough(
                 let req_id2 = req_id.clone();
                 let upstream_stream = resp.bytes_stream();
                 let body_stream = futures_util::stream::unfold(
-                    (upstream_stream, SseNormalizer::new(), false, logger, req_id2),
-                    move |(mut stream, mut norm, mut done, logger, req_id)| async move {
+                    (upstream_stream, SseNormalizer::new(), false, logger, req_id2, state.total_dropped.clone()),
+                    move |(mut stream, mut norm, mut done, logger, req_id, total_dropped)| async move {
                         if done {
                             return None;
                         }
@@ -380,7 +763,7 @@ async fn passthrough(
                                         }
                                         return Some((
                                             Ok::<_, std::io::Error>(bytes::Bytes::from(out)),
-                                            (stream, norm, done, logger, req_id),
+                                            (stream, norm, done, logger, req_id, total_dropped),
                                         ));
                                     }
                                 }
@@ -388,7 +771,7 @@ async fn passthrough(
                                     logger.error(&format!("[{req_id}] 上游流错误: {e}"));
                                     return Some((
                                         Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
-                                        (stream, norm, true, logger, req_id),
+                                        (stream, norm, true, logger, req_id, total_dropped),
                                     ));
                                 }
                                 None => {
@@ -398,6 +781,7 @@ async fn passthrough(
                                     let info = norm.drain_abrupt();
                                     if let Some(m) = info {
                                         logger.error(&format!("[{req_id}] {m}"));
+                                        total_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     }
                                     logger.info(&format!(
                                         "[{req_id}] SSE 流结束(done={})，规整下发 {} 行，丢弃 {} 个无效帧，耗时 {:.2}s",
