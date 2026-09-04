@@ -16,7 +16,7 @@
 > 给 GitHub Action 发 GitHub Release 时用的正文。按最新→最旧排列，HEAD 即下一个待发版内容。
 
 ### [Unreleased]
-- **新增**【v0.3.0 架构加固】：① 模型感知：仅 `glm-5.3*` SSE 归一化，其它模型字节级直通 ② 带内错误帧：断流/读空闲时丢残帧后补发标准 `error` 事件 + `[DONE]`（不是伪造数据帧）③ 取消透传：客户端断开经 NotifyDrop 实锤上游中止 ④ Header 白名单（仅 Authorization/Content-Type/Accept/User-Agent）⑤ `idle_timeout_secs` 读空闲看门狗（默认 120s）⑥ `auth_token` 远端令牌鉴权 ⑦ `--log-level debug` + `rejoined` 跨块拼接计数 ⑧ 区域/key 启动提醒 + doctor 401 提示。CI windows 首发再修一处（missing CommandExt import）。全 7 项均端到端实测通过（401 拦截、idle 触发错误帧、取消透传 debug、直通分支、白名单滤头）。
+- **清理**：移除 v0.3.0 遗留的死代码 CancellationToken（从未 cancel，实际取消靠 drop 传播），卸掉 `tokio-util` 依赖；补注释说明取消透传真实机制。- **新增**【v0.3.0 架构加固】：① 模型感知：仅 `glm-5.3*` SSE 归一化，其它模型字节级直通 ② 带内错误帧：断流/读空闲时丢残帧后补发标准 `error` 事件 + `[DONE]`（不是伪造数据帧）③ 取消透传：客户端断开经 NotifyDrop 实锤上游中止 ④ Header 白名单（仅 Authorization/Content-Type/Accept/User-Agent）⑤ `idle_timeout_secs` 读空闲看门狗（默认 120s）⑥ `auth_token` 远端令牌鉴权 ⑦ `--log-level debug` + `rejoined` 跨块拼接计数 ⑧ 区域/key 启动提醒 + doctor 401 提示。CI windows 首发再修一处（missing CommandExt import）。全 7 项均端到端实测通过（401 拦截、idle 触发错误帧、取消透传 debug、直通分支、白名单滤头）。
 - **新增**【CLI 大版本】：① 守护进程化 `start/stop/restart/status`（进程名 `piglmbridged`，pid 文件 + stale 清理 + 优雅退出最长等 30s）② `doctor` 体检子命令（配置/端口/上游探活）③ `--addr` 与代理端 env 通道（`PIGLMBRIDGER_ADDR`，优先级 CLI > env > config > 默认）④ 日志 TTY 自动着色（ERROR 红 / req_id 青色成组），管道自动纯文本，`--color` 可强制；修复 colorize 在中文行上的字节切片 panic（改 `get()` 安全切片，附单测）⑤ 退出时打印本次运行统计（请求数/残断次数/时长）。修复前端口占用直接 panic，现在输出可读错误并 exit(1)。
 - **CI**：新增 GitHub Actions 发布流水线（`.github/workflows/release.yml`）：推 `v*` tag 自动交叉编译 5 平台（macOS arm64/x64、Windows x64、Linux x64/arm64 musl 静态）并发布 Release；说明文字自动取自本文件 `[Unreleased]` 段。依赖前提：`reqwest` TLS 从 native-tls 切到 **rustls**（纯 Rust，消除 OpenSSL 交叉编译地狱）。
 - **更名**：项目 `glm-fix-proxy` → **`piglmbridger`**（二进制/包名/配置目录 `~/.piglmbridger` 同步更名；旧路径留软链兼容；env `PIGLMBRIDGER_PORT` 兼容旧 `GLM_FIX_PROXY_PORT`）。
@@ -69,6 +69,10 @@ pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai
 
 ### D07 — settings 与代理作用边界
 两层方案并存：pi settings 只管“重试次数/超时”（缓解），代理管“碎帧重组/去错/丢弃”（根治分片问题）。代理修复后即使 `maxRetries` 高也不至于疯狂刷屏。
+
+### D09 — 取消透传机制澄清 + 死代码清理
+背景：用户确认 Esc 停止时是否立即停止上游传输（token 浪费关切）。
+**结论**：取消透传成立且靠 drop 传播——pi abort → hyper drop body → unfold 状态（含 reqwest bytes_stream）一并 drop → 上游连接立即关闭。但 v0.3.0 引入的 CancellationToken 是死代码（从未调用 cancel()，`let _ = token` 直接丢弃），已从 unfold 元组中全部移除，并卸掉 Cargo.toml 的 `tokio-util` 依赖；在原位置留注释说明真实取消机制。测试 6/6 通过。注：K05 的「取消透传」叙述以本条为准（机制是 drop 传播，非显式 token）。
 
 ### D08 — 剩余提示
 想彻底理解 GLM vs OpenAI 的 tool 拆包差异时，抓 OpenAI 兼容 SDK 时序（delta.role/content/tool_calls index 语义），不要假设所有兼容端点 chunk 语义完全一致。

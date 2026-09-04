@@ -880,8 +880,6 @@ async fn passthrough_inner(
                 ));
                 let logger = state.logger.clone();
                 let req_id2 = req_id.clone();
-                let token = tokio_util::sync::CancellationToken::new();
-                let token2 = token.clone();
                 let idle = state.idle_secs;
                 let upstream_stream = resp.bytes_stream();
                 let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -891,8 +889,8 @@ async fn passthrough_inner(
                 let req_id_for_drop = req_id.clone();
                 let body_stream = NotifyDrop::new(
                     futures_util::stream::unfold(
-                    (upstream_stream, SseNormalizer::new(), false, logger, req_id2, state.total_dropped.clone(), token2, idle, finished_for_unfold),
-                    move |(mut stream, mut norm, mut done, logger, req_id, total_dropped, token, idle, finished2)| async move {
+                    (upstream_stream, SseNormalizer::new(), false, logger, req_id2, state.total_dropped.clone(), idle, finished_for_unfold),
+                    move |(mut stream, mut norm, mut done, logger, req_id, total_dropped, idle, finished2)| async move {
                         if done {
                             return None;
                         }
@@ -913,7 +911,7 @@ async fn passthrough_inner(
                                     let out = norm.error_frame(&m);
                                     return Some((
                                         Ok::<_, std::io::Error>(bytes::Bytes::from(out)),
-                                        (stream, norm, true, logger, req_id, total_dropped, token, idle, finished2),
+                                        (stream, norm, true, logger, req_id, total_dropped, idle, finished2),
                                     ));
                                 }
                                 Ok(Some(Ok(chunk))) => {
@@ -930,7 +928,7 @@ async fn passthrough_inner(
                                         }
                                         return Some((
                                             Ok::<_, std::io::Error>(bytes::Bytes::from(out)),
-                                            (stream, norm, done, logger, req_id, total_dropped, token, idle, finished2),
+                                            (stream, norm, done, logger, req_id, total_dropped, idle, finished2),
                                         ));
                                     }
                                 }
@@ -938,7 +936,7 @@ async fn passthrough_inner(
                                     logger.error(&format!("[{req_id}] 上游流错误: {e}"));
                                     return Some((
                                         Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
-                                        (stream, norm, true, logger, req_id, total_dropped, token, idle, finished2),
+                                        (stream, norm, true, logger, req_id, total_dropped, idle, finished2),
                                     ));
                                 }
                                 Ok(None) => {
@@ -971,7 +969,7 @@ async fn passthrough_inner(
                                     }
                                     return Some((
                                         Ok::<_, std::io::Error>(bytes::Bytes::from(out)),
-                                        (stream, norm, true, logger, req_id, total_dropped, token, idle, finished2),
+                                        (stream, norm, true, logger, req_id, total_dropped, idle, finished2),
                                     ));
                                 }
                             }
@@ -982,7 +980,9 @@ async fn passthrough_inner(
                     req_id_for_drop,
                     finished_for_drop,
                 );
-                let _ = token; // Drop 守卫负责取消透传（见 NotifyDrop::drop）
+                // 取消透传说明：客户端断开 → hyper drop 本 body → unfold 状态
+                // （含 reqwest bytes_stream）一并 drop → 上游连接立即关闭。
+                // 依赖 Rust drop 传播，无需显式 CancellationToken。
 
                 let mut resp = Response::new(Body::from_stream(body_stream));
                 *resp.status_mut() = status;
