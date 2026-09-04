@@ -153,6 +153,12 @@ enum Command {
         #[arg(long)]
         api_key: Option<String>,
     },
+    /// 汇总请求统计（读取 stats.jsonl）
+    Stats {
+        /// 只统计最近 N 天（0 = 全部）
+        #[arg(long, default_value_t = 0)]
+        days: u32,
+    },
     /// 查看代理日志
     Logs {
         /// 只显示最后 N 行
@@ -174,6 +180,8 @@ struct AppState {
     /// 进程级累计统计
     total_requests: Arc<std::sync::atomic::AtomicU64>,
     total_dropped: Arc<std::sync::atomic::AtomicU64>,
+    /// stats.jsonl 路径（每请求一行，供 stats 子命令汇总）
+    stats_path: PathBuf,
 }
 
 #[tokio::main]
@@ -189,6 +197,9 @@ async fn main() {
         color: "auto".into(),
         daemon: false,
     }) {
+        Command::Stats { days } => {
+            print_stats(&config.log_dir.join("stats.jsonl"), days);
+        }
         Command::Logs { lines, follow } => {
             logger::view_logs(&config.log_dir.join("proxy.log"), lines, follow);
         }
@@ -247,6 +258,7 @@ async fn main() {
                 inflight: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 total_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 total_dropped: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                stats_path: cfg.log_dir.join("stats.jsonl"),
             };
 
             if daemon {
@@ -692,8 +704,18 @@ async fn passthrough(
     state.inflight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     state.total_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let result = passthrough_inner(state.clone(), uri, headers, body, req_id, start).await;
+    let result = passthrough_inner(state.clone(), uri, headers, body, req_id.clone(), start).await;
     state.inflight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    let line = json!({
+        "ts": chrono::Local::now().to_rfc3339(),
+        "id": req_id,
+        "elapsed_ms": start.elapsed().as_millis() as u64,
+        "status": result.status().as_u16(),
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&state.stats_path) {
+        use std::io::Write as _;
+        let _ = writeln!(f, "{line}");
+    }
     result
 }
 
@@ -903,6 +925,52 @@ mod tests {
         assert_eq!(out, vec!["data: {\"x\":1}"]);
         assert!(n.buffer.is_empty());
     }
+}
+
+fn print_stats(path: &PathBuf, days: u32) {
+    use std::io::BufRead;
+    if !path.exists() {
+        eprintln!("暂无统计数据（{path:?} 不存在，先跑一些请求）");
+        return;
+    }
+    let file = std::fs::File::open(path).expect("open stats");
+    let cutoff = if days > 0 {
+        Some(chrono::Utc::now() - chrono::Duration::days(days as i64))
+    } else {
+        None
+    };
+    let mut count = 0u64;
+    let mut ok = 0u64;
+    let mut err = 0u64;
+    let mut total_ms = 0u128;
+    let mut max_ms: u128 = 0;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if let Some(c) = cutoff {
+            let ts = v["ts"].as_str().unwrap_or("");
+            match chrono::DateTime::parse_from_rfc3339(ts) {
+                Ok(t) if t < cutoff.unwrap() => continue,
+                _ => {}
+            }
+        }
+        count += 1;
+        let st = v["status"].as_u64().unwrap_or(0);
+        if (200..300).contains(&st) { ok += 1 } else { err += 1 }
+        let ms = v["elapsed_ms"].as_u64().unwrap_or(0) as u128;
+        total_ms += ms;
+        max_ms = max_ms.max(ms);
+    }
+    if count == 0 {
+        println!("所选时间范围内没有请求");
+        return;
+    }
+    println!("piglmbridger 请求统计{}\n==================", if days > 0 { format!("（最近 {days} 天）") } else { Default::default() });
+    println!("总请求:   {count}");
+    println!("成功:     {ok} ({:.1}%)", ok as f64 * 100.0 / count as f64);
+    println!("非2xx:    {err}");
+    println!("平均耗时: {:.0}ms", total_ms as f64 / count as f64);
+    println!("最大耗时: {max_ms}ms");
+    println!("数据源:   {path:?}");
 }
 
 fn rand_u24() -> u32 {

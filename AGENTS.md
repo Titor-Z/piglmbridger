@@ -19,7 +19,7 @@
 - **新增**【CLI 大版本】：① 守护进程化 `start/stop/restart/status`（进程名 `piglmbridged`，pid 文件 + stale 清理 + 优雅退出最长等 30s）② `doctor` 体检子命令（配置/端口/上游探活）③ `--addr` 与代理端 env 通道（`PIGLMBRIDGER_ADDR`，优先级 CLI > env > config > 默认）④ 日志 TTY 自动着色（ERROR 红 / req_id 青色成组），管道自动纯文本，`--color` 可强制；修复 colorize 在中文行上的字节切片 panic（改 `get()` 安全切片，附单测）⑤ 退出时打印本次运行统计（请求数/残断次数/时长）。修复前端口占用直接 panic，现在输出可读错误并 exit(1)。
 - **CI**：新增 GitHub Actions 发布流水线（`.github/workflows/release.yml`）：推 `v*` tag 自动交叉编译 5 平台（macOS arm64/x64、Windows x64、Linux x64/arm64 musl 静态）并发布 Release；说明文字自动取自本文件 `[Unreleased]` 段。依赖前提：`reqwest` TLS 从 native-tls 切到 **rustls**（纯 Rust，消除 OpenSSL 交叉编译地狱）。
 - **更名**：项目 `glm-fix-proxy` → **`piglmbridger`**（二进制/包名/配置目录 `~/.piglmbridger` 同步更名；旧路径留软链兼容；env `PIGLMBRIDGER_PORT` 兼容旧 `GLM_FIX_PROXY_PORT`）。
-- **新增**：仓库附带 pi 接入资产 `pi/` 目录（`pi/extensions/glm-proxy.ts` + `pi/settings.glm-snippet.json`），代理与 pi 侧配置一套交付；README 补安装说明。
+- **新增**：仓库附带 pi 接入资产 `pi/` 目录（`pi/extensions/piglmbridger.ts` + `pi/settings.glm-snippet.json`），代理与 pi 侧配置一套交付；README 补安装说明。
 - **修复**【重要·根治间歇性断帧】：修正 agent SSE 行重组逻辑
   - 之前：某次上游网络块既含完整 `data:` 行、又含半截未写完的行时，默认其“整块无换行才等下一块”，导致半截 JSON 被当成完整帧下发给 pi → `Unterminated string in JSON` / 反复重试。
   - 现在：仅将真正以换行/空行收尾的片段下发给下游；未写完的尾部一律留缓冲，待下一块拼齐后再发；绝不伪造残缺帧。修复前触发场景约 60% 失败，修复后压测 14/14 通过。
@@ -47,7 +47,7 @@
 **结论**：配置里并不存在 `streaming.chunkParseStrict` 与顶层 `retry.maxDelayMs`，是无效键，已剔除。仅是“症状缓解”，不是根因。
 
 ### D03 — 接入方式：用扩展改 zai baseUrl 而非 /login 自配
-pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai` provider（含 glm-5.3-flash）。方案：`~/.pi/agent/extensions/glm-proxy.ts` 覆盖 `zai` 的 baseUrl 到本地代理，端口可由 `PIGLMBRIDGER_PORT（旧名 GLM_FIX_PROXY_PORT 仍兼容）`（默认 8123）配置。
+pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai` provider（含 glm-5.3-flash）。方案：`~/.pi/agent/extensions/piglmbridger.ts` 覆盖 `zai` 的 baseUrl 到本地代理，端口可由 `PIGLMBRIDGER_PORT（旧名 GLM_FIX_PROXY_PORT 仍兼容）`（默认 8123）配置。
 **结论**：不动脑搭建复杂 provider，直接复用内置模型 definition 与鉴权通道；端口需要与代理配置 / config.toml / CLI `--port` 三处同步（见 README）。
 
 ### D04 — 抓住第一个真实 bug：断流时伪造半帧
@@ -79,7 +79,7 @@ pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai
 ### 已完成 ✅
 - [x] pi settings：宽松重试（maxRetries=1、basDelay=6000、timeoutMs=120000、httpIdleTimeoutMs=120000）；已剔除无效键。
 - [x] Rust 代理功能集齐：`serve`/`logs` 子命令、`--port/--upstream/--timeout`、`config.toml`、文件日志 + follow、日志轮转。
-- [x] pi 扩展 `glm-proxy.ts`：zai baseUrl → 本地代理；端口可用 `PIGLMBRIDGER_PORT（旧名 GLM_FIX_PROXY_PORT 仍兼容）`（默认 8123）改。
+- [x] pi 扩展 `piglmbridger.ts`：zai baseUrl → 本地代理；端口可用 `PIGLMBRIDGER_PORT（旧名 GLM_FIX_PROXY_PORT 仍兼容）`（默认 8123）改。
 - [x] settings 保险：modelThinkingLevels 里把 glm-5.3 系列默认思考钉到 `low`（防用户手动拉到 off 的裸奔 1210）。
 - [x] 修复同块“完整行+残缺尾行”误整帧（root cause，[Unreleased]）。
 - [x] SSE 断流残帧丢弃逻辑（不伪造）。
@@ -92,6 +92,7 @@ pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai
 ### 待办 / 下一步 🔜
 - [ ] python lib 之类引用的 code 文件 artifact 精确性由 agent 描述保证（本次 script.py 里被模型混入了它声称之外的 timestamp 行——是模型/提示词产物，不是代理 bug，如需可加例程剔除杂散行）。
 - [x] 守护进程化（piglmbridged）+ doctor + 颜色日志 + --addr（v0.2.0）。
+- [x] stats 统计子命令（stats.jsonl 落盘 + 汇总展示）；pi 扩展更名 piglmbridger.ts；LICENSE(MIT) + README 徽章 + 仓库转公开。
 - [ ] 可选：launchd / systemd 开机自启示例文档。
 - [ ] 可选：加更细粒度指标（每流字节数/耗时打进另一张表），方便灰度期观察。
 - [ ] 接入 GitHub Action 发布（workflow 已写好 `.github/workflows/release.yml`；待重启会话后本地验证 rustls 构建通过 + git commit + 推 tag 首发实测）。
@@ -131,15 +132,23 @@ GLM 官方约只有 payload 大体兼容；`tool_stream`、thinking 策略、分
 
 ---
 
+### K08 — 跨平台 cfg 门控代码在本地永远编译不到 (⚠️ 发版必踩)
+`#[cfg(windows)]` 里的代码（如 `creation_flags` 缺 `CommandExt` 导入）在 mac 本地 `cargo check` 完全不报错，只有 Windows runner 能暴露。
+**纪律**：① 写了 cfg 门控分支后，推 tag 前至少跑一次 `cargo check --target x86_64-pc-windows-msvc`（或接受首发红一次、看日志秒修的节奏）；② CI 红了先 `gh api .../jobs/<id>/logs` 拉日志，错误都在最后几行。
+
+### K09 — 别用字节下标切片可能含中文的 String
+`&s[pos..pos+8]` 这种字节切片在多字节字符中间会直接 panic（`is not a char boundary`）。本次 colorize_req_ids 在中文日志行上就是被实测打中的。
+**纪律**：非 ASCII 可能出现的字符串切片一律用 `s.get(a..b)`（返回 Option）或 `char_indices`。
+
 ## 附：相关路径速查
 | 项 | 路径 / 命令 |
 |---|---|
 | 源码 | `~/piglmbridger/src/main.rs`、`src/logger.rs` |
 | 配置 | `~/.piglmbridger/config.toml` |
 | 日志 | `~/.piglmbridger/logs/proxy.log`（logs -f 看） |
-| pi 扩展（本仓库参考版） | `pi/extensions/glm-proxy.ts` |
+| pi 扩展（本仓库参考版） | `pi/extensions/piglmbridger.ts` |
 | pi settings 片段（本仓库参考版） | `pi/settings.glm-snippet.json` |
-| pi 扩展（已安装） | `~/.pi/agent/extensions/glm-proxy.ts` |
+| pi 扩展（已安装） | `~/.pi/agent/extensions/piglmbridger.ts` |
 | pi settings | `~/.pi/agent/settings.json` |
 | 构建/测试 | `cargo build --release`、`cargo test` |
 | 运行 | `./target/release/piglmbridger serve [--port]` |

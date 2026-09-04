@@ -1,6 +1,6 @@
 // pi 接入 piglmbridger 的扩展：把内置 zai（智谱）provider 的 baseUrl 改道本地代理。
 //
-// 安装：复制到 ~/.pi/agent/extensions/glm-proxy.ts （或用 pi 的 extensions 配置指向本文件）
+// 安装：复制到 ~/.pi/agent/extensions/piglmbridger.ts （或用 pi 的 extensions 配置指向本文件）
 // 鉴权：/login 选 zai，填智谱(open.bigmodel.cn) 的 API Key。
 //
 // 数据流：pi -> http://127.0.0.1:${PIGLMBRIDGER_PORT:-8123} -> https://open.bigmodel.cn/api/paas/v4

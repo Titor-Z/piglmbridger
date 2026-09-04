@@ -1,5 +1,9 @@
 # piglmbridger — Pi-Agent × GLM-5.3-Flash SSE 桥接器
 
+![Release](https://img.shields.io/github/v/release/Titor-Z/piglmbridger?logo=github)
+![CI](https://github.com/Titor-Z/piglmbridger/actions/workflows/release.yml/badge.svg)
+![License](https://img.shields.io/github/license/Titor-Z/piglmbridger)
+
 > 专为 Pi-Agent + GLM-5.3-Flash 打造的 Rust 代理桥接器：修复智谱 SSE 流式分片破碎引发的无限重试、输出截断问题。
 > 配合 pi 内置 `zai` provider 覆写 baseUrl，对接智谱国内 API（open.bigmodel.cn）。
 
@@ -82,13 +86,13 @@ log_dir = "/Users/<you>/.piglmbridger/logs"
 ## pi 侧接入（~/piglmbridger 端口与扩展同步）
 
 本仓库已附带 pi 侧接入资产（`pi/` 目录）：
-- [`pi/extensions/glm-proxy.ts`](pi/extensions/glm-proxy.ts) — 把内置 `zai` provider 的 baseUrl 指向本地代理
+- [`pi/extensions/piglmbridger.ts`](pi/extensions/piglmbridger.ts) — 把内置 `zai` provider 的 baseUrl 指向本地代理
 - [`pi/settings.glm-snippet.json`](pi/settings.glm-snippet.json) — GLM 推荐配置**片段**（重试/超时/思考级别），按段合并进你的 settings.json，不要整份覆盖
 
 安装：
 ```bash
 mkdir -p ~/.pi/agent/extensions
-cp pi/extensions/glm-proxy.ts ~/.pi/agent/extensions/
+cp pi/extensions/piglmbridger.ts ~/.pi/agent/extensions/
 # 然后把 pi/settings.glm-snippet.json 里需要的段合并进 ~/.pi/agent/settings.json
 ```
 
@@ -98,7 +102,7 @@ pi 用一个扩展把内置 `zai` provider 的 baseUrl 指到本地代理，端�
 |---|---|---|
 | 配置文件 | `~/.piglmbridger/config.toml` → `port` | 8123 |
 | CLI | `--port`（会覆盖配置文件） | — |
-| pi 扩展 | `~/.pi/agent/extensions/glm-proxy.ts` 里 `PIGLMBRIDGER_PORT`（旧名 `GLM_FIX_PROXY_PORT` 仍兼容）或 `DEFAULT_PORT` | 8123 |
+| pi 扩展 | `~/.pi/agent/extensions/piglmbridger.ts` 里 `PIGLMBRIDGER_PORT`（旧名 `GLM_FIX_PROXY_PORT` 仍兼容）或 `DEFAULT_PORT` | 8123 |
 
 改端口时三处同步（例如改成 9999）：
 
@@ -111,7 +115,7 @@ sed -i '' 's/port = 8123/port = 9999/' ~/.piglmbridger/config.toml
 
 # 3) 改扩展端口并重启 pi
 #    设置环境变量：export PIGLMBRIDGER_PORT=9999   （旧名 GLM_FIX_PROXY_PORT 仍兼容）
-#    或修改 glm-proxy.ts 的 DEFAULT_PORT = 9999
+#    或修改 piglmbridger.ts 的 DEFAULT_PORT = 9999
 pi
 ```
 
