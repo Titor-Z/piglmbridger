@@ -86,12 +86,35 @@ log_dir = "/Users/<you>/.piglmbridger/logs"
 
 ## 日志
 
+### 终端日志图例（`serve` 前台运行时）
+
+```
+02:25:10.561 ▶ [c8bdb0] glm-5.3-flash → bigmodel.cn/chat/completions ↑ 357.6KB
+⠹ [c8bdb0] ↓ 48.2KB…
+02:25:42.517 ✔ [c8bdb0] 200 · +5.2s · ↑ 357.6KB · ↓ 96.4KB · 1250 tok
+```
+
+| 符号 | 含义 |
+|---|---|
+| `▶` | 请求开始（模型 + 上游缩写 + ↑ 请求体大小） |
+| `⠋⠙⠹…` | SSE 传输中原位动画（↓ 已下行字节数；结束时擦除，不占历史） |
+| `✔` / `✘` | 请求完成 / 失败（含 idle 中止、上游拒绝） |
+| `↑` / `↓` | 上行请求体 / 下行响应字节数 |
+| `tok` | 上游 usage 的 total_tokens（计费口径） |
+| `+5.2s` / `首包 812ms` | 总耗时 / 真·首包延迟（第一个上游 chunk） |
+| `[c8bdb0]` | 请求 ID（6 位十六进制，同一请求跨行成组） |
+
+终端只保留开始/结束两条历史，中间过程数据在文件日志里完整保留。
+
+### 文件日志
+
 - 文件：`~/.piglmbridger/logs/proxy.log`（超过 10 MB 会自动轮转为 `proxy.log.1`）
 - 一条典型记录：
   ```
-  [INFO ] [6f11b1] <- 200 OK SSE 流开始
+  [INFO ] [c8bdb0] -> glm-5.3-flash POST /v1/chat/completions (req 357.6KB) 转发至 https://open.bigmodel.cn/api/paas/v4/chat/completions
+  [INFO ] [c8bdb0] … ↓ 48.2KB
+  [INFO ] [c8bdb0] <- 200 耗时 5.21s 首包 812ms req 357.6KB resp 96.4KB 1250 tok
   [ERROR] [bdfc5e] 流被上游切断：残留未终结的 data 残帧(60B)已丢弃: data: {...…
-  [INFO ] [bdfc5e] SSE 流结束(done=false)，规整下发 1 行，丢弃 1 个无效帧，耗时 0.21s
   ```
 - `done=false` + 丢弃残帧 → 上游曾把流砍断（GLM 已知坑），代理已安全兜住。
 
