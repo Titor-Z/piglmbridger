@@ -144,6 +144,7 @@ pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai
 ### D21 — /logs 单行摘要 + 扩展去二进制依赖
 背景：`/bridger` 服务控制报 `unrecognized subcommand 'service'`（用户 PATH 里的二进制是 v0.5 前旧版）；暴露出「扩展 execFile 调外部 CLI」的脆弱面。用户定调：能不依赖就不依赖，服务控制砍掉。
 结论：① 菜单定稿 4 项，只保留无需二进制的能力（HTTP 探活 + 写 config.toml + fetch 摘要）；② 「查看日志」用户点名要紧凑单行式（不是日志原文）：实现在 Logger 内部——`start_request` 记 pending、`finish_request` 拼单行入库，零调用点改动；③ 用户问「单行是否要把 req/resp 相加」——纠偏：字段是不同方向的量（↑ 请求体、↓ 响应流）各出现一次即可，tokens 本来就是 usage 总量（输入+输出），无需求和；④ 代理重启内存缓冲清空 → 兑底解析 proxy.log 配对 `->`/`<-` 行重建同款摘要；⑤ 时间戳用开始时刻（pending 里存），观感与用户示例一致。
+【发布记录】v0.7.0 已发（tag v0.7.0 → 5 平台二进制 + GitHub Release 全绿；npm-v0.2.0 → pi-glmbridger@0.2.0 已上 registry，npm view 确认）。
 
 ### D20 — pi 侧资产拆分为独立 npm 包 `pi-glmbridger`；/bridger 交互管理
 背景：pi 扩展与 Rust 代理同仓库混发，用户升级只能手动 cp 文件；且端口要 pi 扩展/配置/CLI 三处手动同步。
