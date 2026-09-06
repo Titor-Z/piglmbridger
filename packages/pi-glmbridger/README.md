@@ -18,6 +18,8 @@ curl -fsSL https://github.com/Titor-Z/piglmbridger/releases/latest/download/inst
 
 然后在 pi 里 `/login` 选 **zai** 填入智谱 API Key，`/model` 选 **glm-5.3-flash**，开始使用。
 
+**无需修改任何 settings.json 配置**——插件会自动接管 zai 的接入；思考档位由 pi 自动适配到模型支持档，重试策略用 pi 默认值即可。
+
 ## 日常使用：`/bridger`
 
 在 pi 里输入 `/bridger`，会弹出一个菜单：
