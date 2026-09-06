@@ -24,6 +24,15 @@ use crate::state::{cleanup_stream, refresh_status, stream_status_text, AppState,
 use crate::stream::SseNormalizer;
 
 /// axum handler 入口：生成 req_id、维护 inflight/total 计数、落 stats.jsonl
+/// 探针：只报代理自身存活/版本，不碰上游（上游探测归 doctor），无需鉴权
+pub async fn health() -> impl IntoResponse {
+    axum::Json(json!({
+        "ok": true,
+        "name": "piglmbridger",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
 pub async fn passthrough(
     State(state): State<AppState>,
     uri: Uri,

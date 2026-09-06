@@ -118,43 +118,34 @@ log_dir = "/Users/<you>/.piglmbridger/logs"
   ```
 - `done=false` + 丢弃残帧 → 上游曾把流砍断（GLM 已知坑），代理已安全兜住。
 
-## pi 侧接入（~/piglmbridger 端口与扩展同步）
+## pi 侧接入
 
-本仓库已附带 pi 侧接入资产（`pi/` 目录）：
-- [`pi/extensions/piglmbridger.ts`](pi/extensions/piglmbridger.ts) — 把内置 `zai` provider 的 baseUrl 指向本地代理
-- [`pi/settings.glm-snippet.json`](pi/settings.glm-snippet.json) — GLM 推荐配置**片段**（重试/超时/思考级别），按段合并进你的 settings.json，不要整份覆盖
+pi 侧扩展已发布为独立 npm 包 **`pi-glmbridger`**（源码在 [`packages/pi-glmbridger/`](packages/pi-glmbridger/)），一条命令安装：
 
-安装：
 ```bash
-mkdir -p ~/.pi/agent/extensions
-cp pi/extensions/piglmbridger.ts ~/.pi/agent/extensions/
-# 然后把 pi/settings.glm-snippet.json 里需要的段合并进 ~/.pi/agent/settings.json
+pi install npm:pi-glmbridger
 ```
 
-pi 用一个扩展把内置 `zai` provider 的 baseUrl 指到本地代理，端口两处要保持一致：
+然后在 pi 里 `/login` 选 **zai** 填智谱 API Key → `/model` 选 **glm-5.3-flash**。
 
-| 控制端 | 位置 | 默认 |
+### /bridger 交互管理
+
+装好后输入 `/bridger` 可直接在 pi 里：
+
+- **状态检查**：探测代理 `/health`（显示版本/端口）
+- **更改端口**：写入 `~/.piglmbridger/config.toml`（与代理共享同一配置，改一处即可）
+- **服务控制**：`service start -d / stop / restart / status`
+- **查看日志**：提示 `piglmbridger logs -f`
+
+### 端口来源（两侧一致）
+
+| 优先级 | 来源 | 默认 |
 |---|---|---|
-| 配置文件 | `~/.piglmbridger/config.toml` → `port` | 8123 |
-| CLI | `--port`（会覆盖配置文件） | — |
-| pi 扩展 | `~/.pi/agent/extensions/piglmbridger.ts` 里 `PIGLMBRIDGER_PORT`（旧名 `GLM_FIX_PROXY_PORT` 仍兼容）或 `DEFAULT_PORT` | 8123 |
+| 1 | 环境变量 `PIGLMBRIDGER_PORT`（旧名 `GLM_FIX_PROXY_PORT` 仍兼容） | — |
+| 2 | `~/.piglmbridger/config.toml` → `port`（`/bridger` 改端口写这里） | 8123 |
+| 3 | CLI `--port`（仅启动时代理侧生效） | — |
 
-改端口时三处同步（例如改成 9999）：
-
-```bash
-# 1) 配置文件（或直接 --port 9999 启动）
-sed -i '' 's/port = 8123/port = 9999/' ~/.piglmbridger/config.toml
-
-# 2) 启动代理
-./target/release/piglmbridger serve
-
-# 3) 改扩展端口并重启 pi
-#    设置环境变量：export PIGLMBRIDGER_PORT=9999   （旧名 GLM_FIX_PROXY_PORT 仍兼容）
-#    或修改 piglmbridger.ts 的 DEFAULT_PORT = 9999
-pi
-```
-
-pi 内步骤：`/login` 选 **zai** 填智谱 API Key → `/model` 选 **glm-5.3-flash** → 跑带工具调用的任务。
+> 手动改端口后：`piglmbridger service restart --port 9999` + pi 里 `/reload`。用 `/bridger` 改端口会自动提示这两步。
 
 ## 诊断指南（出问题时怎么分工）
 

@@ -1,6 +1,5 @@
 //! 集成测试：mock SSE 上游 + 真实转发链路
-use axum::routing::post;
-use axum::Router;
+use axum::{routing::{get, post}, Router};
 use piglmbridger::logger::Logger;
 use piglmbridger::state::AppState;
 use std::sync::Arc;
@@ -59,6 +58,7 @@ fn sse_frames() -> Vec<u8> {
 fn app(state: AppState) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(piglmbridger::proxy::passthrough))
+        .route("/health", get(piglmbridger::proxy::health))
         .fallback(piglmbridger::proxy::passthrough)
         .with_state(state)
 }
@@ -141,4 +141,20 @@ async fn auth_token_rejects_without_reaching_upstream() {
     let base = spawn_app(state).await;
     let resp = post_chat(&base, "glm-5.3-flash", None).await;
     assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn health_endpoint_reports_ok_without_auth() {
+    let state = test_state("http://127.0.0.1:1".into(), Logger::memory(), "secret");
+    let base = spawn_app(state).await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/health"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["ok"], serde_json::json!(true));
+    assert_eq!(body["name"], "piglmbridger");
+    assert!(body["version"].as_str().is_some());
 }

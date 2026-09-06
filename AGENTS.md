@@ -17,6 +17,10 @@
 
 ### [Unreleased]
 
+### 0.6.0
+- **新增**【GET /health】：代理探针端点，返回 `{ok,name,version}`；handler 在 lib 导出供集成测试复用（+1 集成断言，共 5）；无需鉴权、不碰上游（上游探测归 doctor）。
+- **新增**【npm 包 pi-glmbridger】：pi 侧扩展拆为独立 npm 包（`packages/pi-glmbridger/`），`pi install npm:pi-glmbridger` 一条命令安装；内置 `/bridger` 交互命令（状态检查/更改端口/服务控制/日志提示）；端口单一事实源（env > config.toml > 8123），改端口写代理同款配置文件，三处手动同步问题根治；主仓库 `pi/` 目录降级为迁移说明。详见 D20。
+
 ### 0.5.0
 - **新增**【CLI v2·docker 风格】：服务生命周期归一为 `service start/stop/restart/status`（`start -d` 后台守护）；裸 `piglmbridger` 只打印 help 不再隐式 serve（防打错字拉起 daemon）；`serve` 降为隐藏内部通道供 -d 自拉起；删除五个顶层子命令三轨归一。
 - **新增**【log -f 会话回放】：启动时落盘一行会话标记（`Logger::marker`，无时间戳前缀），`logs -f` 倒读文件定位最后一个标记，先回放本次会话全部日志再跟踪新增；无标记（老日志）回退末尾 N 条；默认行数 30→50，加 `log` 别名。
@@ -131,6 +135,11 @@ pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai
 ### D14 — 启动横幅美化：采纳“图标+淡色+对齐”，否决 `colored` 与“删 logger.info”
 背景：外部建议用 `colored` crate + `println!` 重写 serve 启动信息（图标/淡色/对齐/空行）。
 **结论**：意图采纳，实现三处否决：① `colored` 引入是幻觉（Cargo.toml 从未有此依赖），D10 已否决过，继续手工 ANSI；② 原建议删掉 `logger.info` 是错的——daemon 模式没有那几行 eprintln，info 是 daemon 启动信息唯一落盘通道，必须保留；③ 管道/非 TTY 必须纯文本（K09 同族）。实现：仅前台分支输出横幅（图标 + 12 宽淡色标签 + 亮色关键值 + bigmodel.cn 时淡色“(国内站，确认 key 匹配)”后缀），TTY 判定复用 `ColorMode::Auto/Always/Never` 语义（stdout `is_terminal()`，需 `use std::io::IsTerminal`），首尾各一空行与日志分隔。logger.info 原样保留双轨。【后补（用户实测反馈）】：用户要求删掉启动时两条 INFO 行（“piglmbridger 启动…”/“上游是国内站…”），已从 serve 分支移除——启动信息现在只剩前台横幅，代价是 daemon 模式文件日志里不再有启动记录，文件日志首条将变成首条请求；标签栏宽 12→14（“Listening on”恰好 12 字符导致零间隙贴死值列）。【再补（用户实测反馈）：emoji 图标宽度/高度不一致】🌐🔗📁💻 属不同 Unicode 区块，宽度由终端字体自决，永远对不齐；改为统一 `●`（U+25CF，所有终端等宽单列）+ 颜色区分（青=监听/蓝=上游/淡=文件与提示），否决 Nerd Font 方案（要求对方装字体，管道/他人终端全是豆腐块）；若用户明确装了 NF 可再换 NF 字形。【三补（用户反馈退出日志风格脱节）】：Ctrl+C 收尾的两条时间戳 INFO 行与横幅风格不统一；改为前台自绘样式行（`● 退出 · 运行 fmt_duration · N 个请求 · 上游残断 M`，青色 ●），新增 `Logger::info_file()`（仅落盘不打终端）保住文件日志纯文本可 grep；“收到退出信号，无在途流直接退出”前台属噪音终端不打印仅落盘；有在途流时用黄色 ● 提示等待；daemon 行为不变（logger.info 照旧落盘）。经验：启动/退出这类“会话级”信息归终端样式行，逐请求日志归 logger 双通道，两者别混。验证：cargo test 12+4 绿；伪 TTY 有色/管道无控制符/daemon 终端零输出 + 文件落盘三项实测。
+
+### D20 — pi 侧资产拆分为独立 npm 包 `pi-glmbridger`；/bridger 交互管理
+背景：pi 扩展与 Rust 代理同仓库混发，用户升级只能手动 cp 文件；且端口要 pi 扩展/配置/CLI 三处手动同步。
+**结论**：① 命名查重（npm registry + GitHub 搜索）后定 `pi-glmbridger`（裸名；`@foolsecret/` scope 的 npm 用户不存在需另行注册，裸名无冲突且 `pi install npm:pi-glmbridger` 辨识度最好）；② 包结构：`packages/pi-glmbridger/`，`package.json` 带 `"pi": {"extensions": ["./extensions/bridger.ts"]}` + `keywords: ["pi-package"]` 进 pi.dev 画廊；pi-coding-agent/typescript/@types/node 全放 devDependencies（pi 安装用 `--omit=dev`，不落地）；③ 端口单一事实源：扩展读 env > `~/.piglmbridger/config.toml` > 8123（与 Rust Config::load 同优先级），`/bridger` 改端口直接写同一 config.toml，三处同步问题根治；④ `/bridger` 用 `ctx.ui.select/input` 菜单：状态检查（fetch `/health`，1.5s 超时）/改端口/服务控制（execFile 调 CLI，ENOENT 时给安装指引）/日志提示；⑤ 改端口生效 = service restart + `/reload`，`registerProvider` 只在加载时执行，不做热重载 hack；⑥ Rust 侧配套 `GET /health`（handler 放 lib 供集成测试复用，只报自身版本不碰上游，上游探测归 doctor）；⑦ 主仓库 `pi/` 目录降级为迁移说明，README 安装指令换 `pi install npm:pi-glmbridger`。实测：包加载无错、zai 模型列表正常、/health 200、真实链路 402 Insufficient Balance（请求已通过上游鉴权，余额与代理无关）。
+**教训**：① 8123 上的 daemon 可能是用户前台手动 `service start` 起的（无 pid 文件），service stop/restart 沾不到它，绝不能 lsof 杀——用户明确要求别动进程；② 旧实例（早期二进制）SIGTERM 不退（疑为老版本无 graceful shutdown），SIGINT 可退；③ pi install 本地路径写绝对路径进 settings，发布后要换 npm 源。
 
 ---
 

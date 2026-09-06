@@ -1,0 +1,40 @@
+{
+  "name": "pi-glmbridger",
+  "version": "0.1.0",
+  "description": "pi 接入 piglmbridger（GLM SSE 修复中转代理）：/bridger 交互管理端口、服务与连接状态",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "glm",
+    "zai",
+    "proxy",
+    "sse"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "prepublishOnly": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/bridger.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "files": [
+    "extensions",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Titor-Z/piglmbridger.git",
+    "directory": "packages/pi-glmbridger"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2"
+  }
+}

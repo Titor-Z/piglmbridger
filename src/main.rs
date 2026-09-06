@@ -10,7 +10,10 @@
 use piglmbridger::{logger, proxy, state};
 
 use clap::{Parser, Subcommand};
-use axum::{routing::post, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::io::IsTerminal;
@@ -22,7 +25,7 @@ use std::time::Duration;
 
 use piglmbridger::logger::Logger;
 use state::AppState;
-use proxy::passthrough;
+use proxy::{health, passthrough};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Config {
@@ -323,6 +326,7 @@ async fn run_serve(
 
             let app = Router::new()
                 .route("/chat/completions", post(passthrough))
+                .route("/health", get(health))
                 .fallback(passthrough)
                 .with_state(state.clone());
 
