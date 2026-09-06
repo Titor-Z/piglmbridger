@@ -59,6 +59,7 @@ fn app(state: AppState) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(piglmbridger::proxy::passthrough))
         .route("/health", get(piglmbridger::proxy::health))
+        .route("/logs", get(piglmbridger::proxy::logs))
         .fallback(piglmbridger::proxy::passthrough)
         .with_state(state)
 }
@@ -157,4 +158,36 @@ async fn health_endpoint_reports_ok_without_auth() {
     assert_eq!(body["ok"], serde_json::json!(true));
     assert_eq!(body["name"], "piglmbridger");
     assert!(body["version"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn logs_endpoint_returns_single_line_summary() {
+    let upstream = spawn_mock(|| sse_frames()).await;
+    let state = test_state(upstream, Logger::memory(), "");
+    let base = spawn_app(state.clone()).await;
+    let resp = post_chat(&base, "glm-5.3-flash", None).await;
+    assert_eq!(resp.status(), 200);
+    let _ = resp.text().await.unwrap();
+
+    let r = reqwest::Client::new()
+        .get(format!("{base}/logs?lines=50"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.unwrap();
+    let lines = body["lines"].as_array().expect("lines 数组");
+    assert_eq!(lines.len(), 1, "单请求应恰好 1 条单行摘要: {lines:?}");
+    let line = lines[0].as_str().unwrap();
+    assert!(line.contains("▶ ["), "开始图标+id: {line}");
+    assert!(line.contains("glm-5.3-flash → "), "模型+目标: {line}");
+    assert!(line.contains("↑ "), "请求体: {line}");
+    assert!(line.contains("↓ "), "响应体: {line}");
+    assert!(line.contains("150 tok"), "usage 总量: {line}");
+    assert!(line.contains("✔ 200"), "状态: {line}");
+    assert!(line.contains("首包 "), "首包: {line}");
+
+    // lines 上限/下限不炸
+    let r = reqwest::Client::new().get(format!("{base}/logs?lines=99999")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
 }

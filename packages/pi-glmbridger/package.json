@@ -1,6 +1,6 @@
 {
   "name": "pi-glmbridger",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "pi 接入 piglmbridger（GLM SSE 修复中转代理）：/bridger 交互管理端口、服务与连接状态",
   "keywords": [
     "pi-package",

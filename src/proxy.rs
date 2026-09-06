@@ -33,6 +33,27 @@ pub async fn health() -> impl IntoResponse {
     }))
 }
 
+/// /logs：末尾 N 条单行摘要（默认 50，上限 200）；内存空时代理重启兑底解析文件日志。
+/// 免鉴权（与 /health 同级：本机回环、只读、不碰上游）。
+#[derive(serde::Deserialize)]
+pub struct LogsQuery {
+    lines: Option<usize>,
+}
+
+pub async fn logs(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<LogsQuery>,
+) -> impl IntoResponse {
+    let n = q.lines.unwrap_or(50).clamp(1, 200);
+    let mut lines = state.logger.summaries(n);
+    if lines.is_empty() {
+        if let Some(p) = state.logger.file_path() {
+            lines = Logger::file_summary_tail(&p, n);
+        }
+    }
+    axum::Json(json!({ "lines": lines }))
+}
+
 pub async fn passthrough(
     State(state): State<AppState>,
     uri: Uri,

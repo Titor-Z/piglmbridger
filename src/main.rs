@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use piglmbridger::logger::Logger;
 use state::AppState;
-use proxy::{health, passthrough};
+use proxy::{health, logs, passthrough};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Config {
@@ -327,6 +327,7 @@ async fn run_serve(
             let app = Router::new()
                 .route("/chat/completions", post(passthrough))
                 .route("/health", get(health))
+                .route("/logs", get(logs))
                 .fallback(passthrough)
                 .with_state(state.clone());
 

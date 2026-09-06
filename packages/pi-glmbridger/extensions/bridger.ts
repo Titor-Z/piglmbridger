@@ -6,7 +6,6 @@
 // 端口来源与 Rust 代理一致：env PIGLMBRIDGER_PORT（旧 GLM_FIX_PROXY_PORT 兼容）> ~/.piglmbridger/config.toml 的 port > 8123
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -77,25 +76,30 @@ async function probe(port: number): Promise<{ state: "up" | "down"; health?: Hea
   }
 }
 
-/** 执行 piglmbridger 子命令（3s 超时），返回 { ok, output } */
-function runCli(args: string[]): Promise<{ ok: boolean; output: string }> {
-  return new Promise((resolve) => {
-    execFile(
-      "piglmbridger",
-      args,
-      { timeout: 3000, encoding: "utf8" },
-      (err, stdout, stderr) => {
-        const output = `${stdout ?? ""}${stderr ?? ""}`.trim();
-        resolve({ ok: !err, output: output || (err ? String(err) : "") });
-      },
-    );
-  });
+/** 拉取末尾 N 条单行摘要（1.5s 超时） */
+async function fetchSummaries(port: number, lines: number): Promise<string[] | null> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 1500);
+  try {
+    const resp = await fetch(`http://127.0.0.1:${port}/logs?lines=${lines}`, { signal: ctrl.signal });
+    if (!resp.ok) return null;
+    const body = (await resp.json()) as { lines?: string[] };
+    return Array.isArray(body.lines) ? body.lines : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-const INSTALL_HINT =
-  "未找到 piglmbridger 二进制。安装：\n" +
-  "  curl -fsSL https://github.com/Titor-Z/piglmbridger/releases/latest/download/install.sh | bash\n" +
-  "（或到 https://github.com/Titor-Z/piglmbridger/releases 下载对应平台二进制）";
+/** 摘要行轻着色：▶ 淡色、✔ 绿、✘ 红、req_id 青色 */
+function colorize(line: string): string {
+  return line
+    .replace(/▶/, "\x1b[2m▶\x1b[0m")
+    .replace(/✔/, "\x1b[1;32m✔\x1b[0m")
+    .replace(/✘/, "\x1b[1;31m✘\x1b[0m")
+    .replace(/\[([0-9a-f]{6})\]/, "\x1b[36m[$1]\x1b[0m");
+}
 
 export default function (pi: ExtensionAPI) {
   const port = resolvePort();
@@ -106,7 +110,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("bridger", {
-    description: "piglmbridger 代理管理（状态/端口/服务/日志）",
+    description: "piglmbridger 代理管理（状态/端口/日志）",
     handler: async (_args, ctx) => {
       let running = true;
       while (running) {
@@ -114,8 +118,7 @@ export default function (pi: ExtensionAPI) {
         const choice = await ctx.ui.select("piglmbridger 管理", [
           `状态检查（端口 ${currentPort}）`,
           "更改端口",
-          "服务控制",
-          "查看日志（提示命令）",
+          "查看日志",
           "退出",
         ]);
         if (choice === undefined || choice === "退出") return;
@@ -127,7 +130,7 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify(`● 代理运行中${v} · 端口 ${currentPort} · 上游 ${HOST}`, "info");
           } else {
             ctx.ui.notify(
-              `! 代理未运行（127.0.0.1:${currentPort} 无响应）\n启动：piglmbridger service start -d`,
+              `! 代理未运行（127.0.0.1:${currentPort} 无响应）\n请在终端启动：piglmbridger serve -d`,
               "warning",
             );
           }
@@ -152,32 +155,27 @@ export default function (pi: ExtensionAPI) {
           } else {
             ctx.ui.notify(
               `✓ 端口已${r === "created" ? "创建配置并写入" : "写入"} ${n} → ${CONFIG_PATH}\n` +
-                `生效步骤：\n  1. piglmbridger service restart --port ${n}\n  2. pi 里 /reload`,
+                `生效步骤：\n  1. 重启代理（终端运行 piglmbridger serve -d，已在跑则先停掉）\n  2. pi 里 /reload`,
               "info",
             );
           }
           continue;
         }
 
-        if (choice === "服务控制") {
-          const action = await ctx.ui.select("服务控制", ["start（后台）", "stop", "restart", "status"]);
-          if (action === undefined) continue;
-          const arg = action!.split(" ")[0] as "start" | "stop" | "restart" | "status";
-          const args = arg === "start" ? ["service", "start", "-d"] : ["service", arg];
-          const r = await runCli(args);
-          if (!r.ok && /ENOENT|not found/i.test(r.output)) {
-            ctx.ui.notify(INSTALL_HINT, "error");
+        if (choice === "查看日志") {
+          const lines = await fetchSummaries(currentPort, 50);
+          if (lines === null) {
+            ctx.ui.notify(
+              `! 代理未运行或拉取失败（127.0.0.1:${currentPort}/logs）\n请在终端启动：piglmbridger serve -d`,
+              "warning",
+            );
+          } else if (lines.length === 0) {
+            ctx.ui.notify(`● 暂无请求记录（端口 ${currentPort}）`, "info");
           } else {
-            ctx.ui.notify(r.output || (r.ok ? "✓ 完成" : "✗ 失败"), r.ok ? "info" : "error");
+            // 每请求一行的单行摘要；行多时取末尾展示
+            const text = lines.map(colorize).join("\n");
+            ctx.ui.notify(text, "info");
           }
-          continue;
-        }
-
-        if (choice.startsWith("查看日志")) {
-          ctx.ui.notify(
-            `在另一个终端运行：\n  piglmbridger logs -f\n（从本次启动处回放并实时跟踪 ${join(homedir(), ".piglmbridger", "logs", "proxy.log")}）`,
-            "info",
-          );
           continue;
         }
       }

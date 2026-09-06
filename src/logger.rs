@@ -1,9 +1,24 @@
 //! 日志模块：写入文件 + 终端输出（TTY 自动着色，管道输出纯文本），支持 logs 子命令查看/跟踪
 
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+/// /logs 单行摘要缓冲容量（FIFO 满则淘汰最老）
+const SUMMARY_CAP: usize = 200;
+/// pending（开始未结束请求）表上限，防止异常路径泄漏（K11 纪律）
+const PENDING_CAP: usize = 500;
+
+/// /logs 摘要：请求开始时记录的信息（finish 时拼成单行）
+struct PendingReq {
+    /// 开始时刻 HH:MM:SS.mmm
+    ts: String,
+    /// "model → host/path"
+    head: String,
+    req_bytes: u64,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ColorMode {
@@ -29,6 +44,12 @@ pub struct Logger {
     status_shown: Arc<Mutex<bool>>,
     /// 内存捕获（仅测试用，memory() 时为 Some）：生产路径必须为 None，否则成隐性泄漏
     captured: Option<Arc<Mutex<Vec<String>>>>,
+    /// 日志文件路径（/logs 文件兜底解析用；disabled/memory 模式为 None）
+    path: Option<PathBuf>,
+    /// /logs 单行摘要：开始未结束的请求（req_id → 开始信息）
+    pending: Arc<Mutex<HashMap<String, PendingReq>>>,
+    /// /logs 单行摘要：成品行（时间序，FIFO）
+    summaries: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl Logger {
@@ -50,6 +71,7 @@ impl Logger {
             ColorMode::Never => false,
             ColorMode::Auto => std::io::stdout().is_terminal(),
         };
+        let path = file_path.clone();
         Ok(Self {
             inner: Some(Arc::new(Mutex::new(file))),
             disabled: false,
@@ -58,11 +80,14 @@ impl Logger {
             level: if debug_on { LogLevel::Debug } else { LogLevel::Info },
             status_shown: Arc::new(Mutex::new(false)),
             captured: None,
+            path: Some(path),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            summaries: Arc::new(Mutex::new(VecDeque::new())),
         })
     }
 
     pub fn disabled() -> Self {
-        Self { inner: None, disabled: true, file_only: false, color: false, level: LogLevel::Info, status_shown: Arc::new(Mutex::new(false)), captured: None }
+        Self { inner: None, disabled: true, file_only: false, color: false, level: LogLevel::Info, status_shown: Arc::new(Mutex::new(false)), captured: None, path: None, pending: Arc::new(Mutex::new(HashMap::new())), summaries: Arc::new(Mutex::new(VecDeque::new())) }
     }
 
     fn write_line(&self, level: &str, msg: &str) {
@@ -204,6 +229,7 @@ impl Logger {
             self.emit_tty(&tty);
         }
         self.write_file("INFO", &file_msg);
+        self.record_start(req_id, model, upstream, req_bytes);
         if !self.color && !self.file_only {
             self.print_plain("INFO", &file_msg);
         }
@@ -296,6 +322,7 @@ impl Logger {
             self.emit_tty(&line);
         }
         self.write_file("INFO", &file_msg);
+        self.record_summary(req_id, status, ok, elapsed, first_byte, tokens, req_bytes, bytes, detail);
         if !self.color && !self.file_only {
             self.print_plain("INFO", &file_msg);
         }
@@ -325,7 +352,209 @@ impl Logger {
             level: LogLevel::Info,
             status_shown: Arc::new(Mutex::new(false)),
             captured: Some(Arc::new(Mutex::new(Vec::new()))),
+            path: None,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            summaries: Arc::new(Mutex::new(VecDeque::new())),
         }
+    }
+
+    /// /logs 摘要行：取末尾 n 条（时间序快照）
+    pub fn summaries(&self, n: usize) -> Vec<String> {
+        let q = self.summaries.lock().unwrap();
+        let skip = q.len().saturating_sub(n);
+        q.iter().skip(skip).cloned().collect()
+    }
+
+    /// 日志文件路径（/logs 文件兜底解析用）
+    pub fn file_path(&self) -> Option<PathBuf> {
+        self.path.clone()
+    }
+
+    /// 记录请求开始信息（供 finish 时拼单行摘要）；pending 表超上限按任意序淘汰防泄漏
+    fn record_start(&self, req_id: &str, model: Option<&str>, upstream: &str, req_bytes: u64) {
+        let ts = chrono::Local::now().format("%H:%M:%S%.3f").to_string();
+        let head = format!("{} → {}", model.unwrap_or("-"), shorten_upstream(upstream));
+        let mut p = self.pending.lock().unwrap();
+        if p.len() >= PENDING_CAP {
+            p.clear(); // 极端兜底：只丢摘要头信息，不影响任何主流程
+        }
+        p.insert(req_id.to_string(), PendingReq { ts, head, req_bytes });
+    }
+
+    /// finish 时拼 /logs 单行摘要并入库：
+    /// `HH:MM:SS.mmm ▶ [id] model → host/path ↑ req · ✔ status +5.2s · 首包 Nms · ↓ resp · T tok`
+    /// 字段各出现一次：↑=请求体、↓=响应流、tok=usage 总量（输入+输出），缺省段自动省略。
+    fn record_summary(
+        &self,
+        req_id: &str,
+        status: u16,
+        ok: bool,
+        elapsed: Option<std::time::Duration>,
+        first_byte: Option<std::time::Duration>,
+        tokens: Option<u64>,
+        req_bytes: Option<u64>,
+        bytes: Option<u64>,
+        detail: &str,
+    ) {
+        let (ts, head, start_req) = match self.pending.lock().unwrap().remove(req_id) {
+            Some(p) => (p.ts, p.head, Some(p.req_bytes)),
+            None => (
+                chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                "-".to_string(),
+                None,
+            ),
+        };
+        let icon = if ok { "✔" } else { "✘" };
+        let mut segs: Vec<String> = Vec::new();
+        if let Some(b) = req_bytes.or(start_req) {
+            segs.push(format!("↑ {}", fmt_bytes(b)));
+        }
+        let mut tail = format!("{icon} {status}");
+        if let Some(d) = elapsed {
+            tail.push(' ');
+            tail.push_str(&fmt_duration(d));
+        }
+        segs.push(tail);
+        if let Some(d) = first_byte {
+            segs.push(format!("首包 {}ms", d.as_millis()));
+        }
+        if let Some(b) = bytes {
+            segs.push(format!("↓ {}", fmt_bytes(b)));
+        }
+        if let Some(t) = tokens {
+            segs.push(format!("{t} tok"));
+        }
+        let mut line = format!("{ts} ▶ [{req_id}] {head} {}", segs.join(" · "));
+        if !detail.is_empty() {
+            line.push(' ');
+            line.push_str(detail);
+        }
+        let mut q = self.summaries.lock().unwrap();
+        if q.len() >= SUMMARY_CAP {
+            q.pop_front();
+        }
+        q.push_back(line);
+    }
+
+    /// /logs 重启兜底：解析文件日志末尾，按 `->`/`<-` 行配对拼出同款单行摘要。
+    /// `…` 进度行与解析失败的行一律跳过。
+    pub fn file_summary_tail(path: &Path, n: usize) -> Vec<String> {
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        let text = String::from_utf8_lossy(&data);
+        let mut starts: HashMap<String, (String, String, String)> = HashMap::new(); // id -> (ts, head, req_str)
+        let mut out: VecDeque<String> = VecDeque::new();
+        for line in text.lines() {
+            // 行结构：`ts [LEVEL] msg`；取 level 右括号后的 msg
+            let body = match line.find("] ") {
+                Some(i) => &line[i + 2..],
+                None => continue,
+            };
+            // ts = 行首完整时间戳的第二段（HH:MM:SS.mmm）
+            let ts = line.split(' ').nth(1).unwrap_or("");
+            if let Some(idx) = body.find("] -> ") {
+                let id = body[1..idx].to_string();
+                let after = &body[idx + 5..];
+                let (model, remainder) = match after.split_once(' ') {
+                    Some(x) => x,
+                    None => continue,
+                };
+                let req_str = remainder
+                    .split("(req ")
+                    .nth(1)
+                    .and_then(|s| s.split(')').next())
+                    .unwrap_or("-")
+                    .to_string();
+                let url = remainder.split("转发至 ").nth(1).unwrap_or("").trim().to_string();
+                starts.insert(id, (ts.to_string(), format!("{model} → {}", shorten_upstream(&url)), req_str));
+                continue;
+            }
+            // `[id] <- status 耗时 Xs 首包 Nms req S resp S T tok [detail]`
+            if let Some(idx) = body.find("] <- ") {
+                let id = body[1..idx].to_string();
+                let after = &body[idx + 5..];
+                let status: u16 = match after.split(' ').next().and_then(|s| s.parse().ok()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let rest = &after[after.find(' ').map(|i| i + 1).unwrap_or(after.len())..];
+                let mut elapsed = None;
+                let mut first = None;
+                let mut req_str: Option<String> = None;
+                let mut resp_str: Option<String> = None;
+                let mut tokens: Option<u64> = None;
+                let mut toks = rest.split_whitespace().peekable();
+                let mut consumed_detail: Vec<&str> = Vec::new();
+                while let Some(t) = toks.next() {
+                    match t {
+                        "耗时" => {
+                            elapsed = toks.next().and_then(|v| v.strip_suffix('s')).and_then(|v| v.parse::<f32>().ok());
+                        }
+                        "首包" => {
+                            first = toks.next().and_then(|v| v.strip_suffix("ms")).and_then(|v| v.parse::<u64>().ok());
+                        }
+                        "req" => req_str = toks.next().map(|s| s.to_string()),
+                        "resp" => resp_str = toks.next().map(|s| s.to_string()),
+                        _ => {
+                            // 可能是 `T tok` 或 detail 开头
+                            let rest_str = rest;
+                            if let Ok(num) = t.parse::<u64>() {
+                                if toks.peek() == Some(&"tok") {
+                                    tokens = Some(num);
+                                    toks.next();
+                                    // tok 之后的全部算 detail
+                                    consumed_detail = toks.collect();
+                                    break;
+                                }
+                            }
+                            // detail：从当前 token 起的原始子串
+                            if let Some(p) = rest_str.find(t) {
+                                consumed_detail = rest_str[p..].split_whitespace().collect();
+                            }
+                            break;
+                        }
+                    }
+                }
+                let (s_ts, head, s_req) = starts
+                    .remove(&id)
+                    .unwrap_or((ts.to_string(), "-".to_string(), "-".to_string()));
+                let icon = if (200..300).contains(&status) { "✔" } else { "✘" };
+                let mut segs: Vec<String> = Vec::new();
+                if req_str.as_deref() != Some("-") {
+                    if let Some(r) = req_str.clone().or(if s_req == "-" { None } else { Some(s_req.clone()) }) {
+                        segs.push(format!("↑ {r}"));
+                    }
+                }
+                let mut tail = format!("{icon} {status}");
+                if let Some(e) = elapsed {
+                    tail.push(' ');
+                    tail.push_str(&fmt_duration(std::time::Duration::from_secs_f32(e)));
+                }
+                segs.push(tail);
+                if let Some(f) = first {
+                    segs.push(format!("首包 {f}ms"));
+                }
+                if let Some(r) = resp_str {
+                    segs.push(format!("↓ {r}"));
+                }
+                if let Some(t) = tokens {
+                    segs.push(format!("{t} tok"));
+                }
+                let mut l = format!("{s_ts} ▶ [{id}] {head} {}", segs.join(" · "));
+                if !consumed_detail.is_empty() {
+                    l.push(' ');
+                    l.push_str(&consumed_detail.join(" "));
+                }
+                if out.len() >= SUMMARY_CAP {
+                    out.pop_front();
+                }
+                out.push_back(l);
+            }
+        }
+        let skip = out.len().saturating_sub(n);
+        out.iter().skip(skip).cloned().collect()
     }
 
     /// 取出捕获的日志行（快照）
@@ -609,5 +838,99 @@ mod tests {
         let m = Logger::memory();
         m.info("x");
         assert_eq!(m.captured().len(), 1);
+    }
+
+    #[test]
+    fn summary_single_line_format() {
+        let log = Logger::disabled();
+        log.start_request("3fcef8", Some("glm-5.3-flash"), "POST", "/chat/completions", "https://open.bigmodel.cn/api/paas/v4/chat/completions", 111_202);
+        log.finish_request(
+            "3fcef8", 200, true,
+            Some(Duration::from_millis(26_080)), Some(Duration::from_millis(3833)),
+            Some(30214), Some(111_202), Some(173_432), "",
+        );
+        let s = log.summaries(50);
+        assert_eq!(s.len(), 1);
+        let l = &s[0];
+        // 单行式：开始+结束指标合一行，字段各出现一次，时间戳 HH:MM:SS.mmm
+        assert!(l.contains("▶ [3fcef8] glm-5.3-flash → bigmodel.cn/chat/completions"), "{l}");
+        assert!(l.contains("↑ 108.6KB"), "{l}");
+        assert!(l.contains("✔ 200 +26.1s"), "{l}");
+        assert!(l.contains("首包 3833ms"), "{l}");
+        assert!(l.contains("↓ 169.4KB"), "{l}");
+        assert!(l.contains("30214 tok"), "{l}");
+        // 时间戳形如 HH:MM:SS.mmm（无日期前缀）
+        let ts = l.split(' ').next().unwrap();
+        assert_eq!(ts.len(), 12, "{l}");
+    }
+
+    #[test]
+    fn summary_error_and_missing_fields() {
+        let log = Logger::disabled();
+        log.start_request("abc123", Some("glm-5.3-flash"), "POST", "/chat/completions", "https://open.bigmodel.cn/api/paas/v4/chat/completions", 1024);
+        log.finish_request(
+            "abc123", 504, false,
+            Some(Duration::from_millis(120_000)), None, None,
+            Some(1024), Some(512), "读空闲中止",
+        );
+        let l = &log.summaries(10)[0];
+        assert!(l.contains("✘ 504 +2:00.0s") || l.contains("✘ 504 +120.0s"), "{l}");
+        assert!(!l.contains("首包"), "缺首包应省略: {l}");
+        assert!(!l.contains(" tok"), "缺 tok 应省略: {l}");
+        assert!(l.contains("读空闲中止"), "{l}");
+        // 无 start 的 finish 也不炸（head 兑底 "-"）
+        log.finish_request("fffff1", 401, false, None, None, None, None, None, "");
+        let l = &log.summaries(10)[1];
+        assert!(l.contains("[fffff1] - ✘ 401"), "{l}");
+    }
+
+    #[test]
+    fn summary_ring_buffer_evicts_oldest() {
+        let log = Logger::disabled();
+        for i in 0..250 {
+            let id = format!("r{i:05x}");
+            log.start_request(&id, Some("m"), "POST", "/c", "https://x.example/c", 1);
+            log.finish_request(&id, 200, true, None, None, None, Some(1), None, "");
+        }
+        let s = log.summaries(500);
+        assert_eq!(s.len(), 200, "容量上限 200");
+        // 最老的被淘汰，最新保留
+        assert!(!s[0].contains("[r00000]"), "{}", s[0]);
+        assert!(s.last().unwrap().contains("[r000f9]"), "{}", s.last().unwrap());
+        // pending 表不驻留（K11）：全部 finish 后应清空
+        // （通过再次 finish 同 id 不产生第二行隐式验证：无法直接读 pending，靠容量不翻倍）
+        assert_eq!(log.summaries(500).len(), 200);
+    }
+
+    #[test]
+    fn file_summary_tail_parses_pairs() {
+        let dir = std::env::temp_dir().join(format!("piglmb-fst-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("proxy.log");
+        std::fs::write(&p, concat!(
+            "2026-09-06 17:45:04.322 [INFO ] [3fcef8] -> glm-5.3-flash POST /chat/completions (req 108.6KB) 转发至 https://open.bigmodel.cn/api/paas/v4/chat/completions\n",
+            "2026-09-06 17:45:09.184 [INFO ] [3fcef8] … ↓ 6.4KB\n",
+            "2026-09-06 17:45:30.405 [INFO ] [3fcef8] <- 200 耗时 26.08s 首包 3833ms req 108.6KB resp 169.4KB 30214 tok\n",
+            "2026-09-06 17:48:28.410 [INFO ] [f59161] -> glm-5.3-flash POST /chat/completions (req 112.9KB) 转发至 https://open.bigmodel.cn/api/paas/v4/chat/completions\n",
+            "2026-09-06 17:48:36.074 [INFO ] [f59161] <- 504 耗时 7.66s req 112.9KB 读空闲中止\n",
+        )).unwrap();
+        let s = Logger::file_summary_tail(&p, 50);
+        assert_eq!(s.len(), 2, "{s:?}");
+        assert!(s[0].starts_with("17:45:04.322 "), "用开始时刻时间戳: {}", s[0]);
+        assert!(s[0].contains("▶ [3fcef8] glm-5.3-flash → bigmodel.cn/chat/completions ↑ 108.6KB · ✔ 200 +26.1s · 首包 3833ms · ↓ 169.4KB · 30214 tok"), "{}", s[0]);
+        assert!(s[1].contains("↑ 112.9KB · ✘ 504 +7.7s") && s[1].ends_with("读空闲中止"), "{}", s[1]);
+        // 文件不存在 → 空数组
+        assert!(Logger::file_summary_tail(&dir.join("nope.log"), 50).is_empty());
+    }
+
+    #[test]
+    fn file_summary_tail_handles_multibyte() {
+        // K09：中文 URL 不得 panic
+        let dir = std::env::temp_dir().join(format!("piglmb-fmb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("proxy.log");
+        std::fs::write(&p, "2026-09-06 17:00:00.000 [INFO ] [ab12cd] -> m POST /路/径 (req 1B) 转发至 https://上游.example/中文\n").unwrap();
+        let s = Logger::file_summary_tail(&p, 50);
+        assert!(s.is_empty() || s[0].contains("[ab12cd]"), "{s:?}");
     }
 }

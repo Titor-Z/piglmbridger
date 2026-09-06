@@ -17,6 +17,11 @@
 
 ### [Unreleased]
 
+### 0.7.0
+- **新增**【GET /logs】：单行请求摘要端点（免鉴权，与 /health 同级）：每请求一行 `HH:MM:SS.mmm ▶ [id] model → host/path ↑ req · ✔ status +耗时 · 首包 Nms · ↓ resp · T tok`，tokens 取 usage 总量（输入+输出），非 2xx ✘+错误短语；内存环形缓冲 200 条 + pending 表（上限 500 防泄漏，K11），代理重启兑底解析 proxy.log 按 `->`/`<-` 行配对重建。handler 在 lib 导出（单测 +5、集成 +1，共 17+6）。
+- **重构**【pi 扩展去除外部二进制依赖】：`/bridger` 移除「服务控制」（execFile 调 CLI 依赖二进制版本，旧版报 unrecognized subcommand 'service'）；菜单定稿 4 项（状态检查/更改端口/查看日志/退出）；「查看日志」改为 fetch `/logs` 在 pi 内直接渲染（▶ 淡/✔ 绿/✘ 红/req_id 青），不再指向终端命令。npm 包发 0.2.0。
+- **新增**【D21】：跨进程取日志走结构化 HTTP 端点（代理吐摘要、扩展只渲染），不让扩展解析另一种语言的日志格式；字段各出现一次不「求和」（↑=请求体、↓=响应流、tok=usage 总量）。
+
 ### 0.6.0
 - **新增**【GET /health】：代理探针端点，返回 `{ok,name,version}`；handler 在 lib 导出供集成测试复用（+1 集成断言，共 5）；无需鉴权、不碰上游（上游探测归 doctor）。
 - **新增**【npm 包 pi-glmbridger】：pi 侧扩展拆为独立 npm 包（`packages/pi-glmbridger/`），`pi install npm:pi-glmbridger` 一条命令安装；内置 `/bridger` 交互命令（状态检查/更改端口/服务控制/日志提示）；端口单一事实源（env > config.toml > 8123），改端口写代理同款配置文件，三处手动同步问题根治；主仓库旧 `pi/` 目录删除，README 安装指令换 `pi install npm:pi-glmbridger`。详见 D20。
@@ -136,6 +141,10 @@ pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai
 背景：外部建议用 `colored` crate + `println!` 重写 serve 启动信息（图标/淡色/对齐/空行）。
 **结论**：意图采纳，实现三处否决：① `colored` 引入是幻觉（Cargo.toml 从未有此依赖），D10 已否决过，继续手工 ANSI；② 原建议删掉 `logger.info` 是错的——daemon 模式没有那几行 eprintln，info 是 daemon 启动信息唯一落盘通道，必须保留；③ 管道/非 TTY 必须纯文本（K09 同族）。实现：仅前台分支输出横幅（图标 + 12 宽淡色标签 + 亮色关键值 + bigmodel.cn 时淡色“(国内站，确认 key 匹配)”后缀），TTY 判定复用 `ColorMode::Auto/Always/Never` 语义（stdout `is_terminal()`，需 `use std::io::IsTerminal`），首尾各一空行与日志分隔。logger.info 原样保留双轨。【后补（用户实测反馈）】：用户要求删掉启动时两条 INFO 行（“piglmbridger 启动…”/“上游是国内站…”），已从 serve 分支移除——启动信息现在只剩前台横幅，代价是 daemon 模式文件日志里不再有启动记录，文件日志首条将变成首条请求；标签栏宽 12→14（“Listening on”恰好 12 字符导致零间隙贴死值列）。【再补（用户实测反馈）：emoji 图标宽度/高度不一致】🌐🔗📁💻 属不同 Unicode 区块，宽度由终端字体自决，永远对不齐；改为统一 `●`（U+25CF，所有终端等宽单列）+ 颜色区分（青=监听/蓝=上游/淡=文件与提示），否决 Nerd Font 方案（要求对方装字体，管道/他人终端全是豆腐块）；若用户明确装了 NF 可再换 NF 字形。【三补（用户反馈退出日志风格脱节）】：Ctrl+C 收尾的两条时间戳 INFO 行与横幅风格不统一；改为前台自绘样式行（`● 退出 · 运行 fmt_duration · N 个请求 · 上游残断 M`，青色 ●），新增 `Logger::info_file()`（仅落盘不打终端）保住文件日志纯文本可 grep；“收到退出信号，无在途流直接退出”前台属噪音终端不打印仅落盘；有在途流时用黄色 ● 提示等待；daemon 行为不变（logger.info 照旧落盘）。经验：启动/退出这类“会话级”信息归终端样式行，逐请求日志归 logger 双通道，两者别混。验证：cargo test 12+4 绿；伪 TTY 有色/管道无控制符/daemon 终端零输出 + 文件落盘三项实测。
 
+### D21 — /logs 单行摘要 + 扩展去二进制依赖
+背景：`/bridger` 服务控制报 `unrecognized subcommand 'service'`（用户 PATH 里的二进制是 v0.5 前旧版）；暴露出「扩展 execFile 调外部 CLI」的脆弱面。用户定调：能不依赖就不依赖，服务控制砍掉。
+结论：① 菜单定稿 4 项，只保留无需二进制的能力（HTTP 探活 + 写 config.toml + fetch 摘要）；② 「查看日志」用户点名要紧凑单行式（不是日志原文）：实现在 Logger 内部——`start_request` 记 pending、`finish_request` 拼单行入库，零调用点改动；③ 用户问「单行是否要把 req/resp 相加」——纠偏：字段是不同方向的量（↑ 请求体、↓ 响应流）各出现一次即可，tokens 本来就是 usage 总量（输入+输出），无需求和；④ 代理重启内存缓冲清空 → 兑底解析 proxy.log 配对 `->`/`<-` 行重建同款摘要；⑤ 时间戳用开始时刻（pending 里存），观感与用户示例一致。
+
 ### D20 — pi 侧资产拆分为独立 npm 包 `pi-glmbridger`；/bridger 交互管理
 背景：pi 扩展与 Rust 代理同仓库混发，用户升级只能手动 cp 文件；且端口要 pi 扩展/配置/CLI 三处手动同步。
 **结论**：① 命名查重（npm registry + GitHub 搜索）后定 `pi-glmbridger`（裸名；`@foolsecret/` scope 的 npm 用户不存在需另行注册，裸名无冲突且 `pi install npm:pi-glmbridger` 辨识度最好）；② 包结构：`packages/pi-glmbridger/`，`package.json` 带 `"pi": {"extensions": ["./extensions/bridger.ts"]}` + `keywords: ["pi-package"]` 进 pi.dev 画廊；pi-coding-agent/typescript/@types/node 全放 devDependencies（pi 安装用 `--omit=dev`，不落地）；③ 端口单一事实源：扩展读 env > `~/.piglmbridger/config.toml` > 8123（与 Rust Config::load 同优先级），`/bridger` 改端口直接写同一 config.toml，三处同步问题根治；④ `/bridger` 用 `ctx.ui.select/input` 菜单：状态检查（fetch `/health`，1.5s 超时）/改端口/服务控制（execFile 调 CLI，ENOENT 时给安装指引）/日志提示；⑤ 改端口生效 = service restart + `/reload`，`registerProvider` 只在加载时执行，不做热重载 hack；⑥ Rust 侧配套 `GET /health`（handler 放 lib 供集成测试复用，只报自身版本不碰上游，上游探测归 doctor）；⑦ 主仓库旧 `pi/` 目录彻底删除（用户要求不留尾巴），两份 README 均按产品视角重写：受众全是使用者，不出现 changelog/架构/流式术语，市场部口吻；npm 0.1.0 已发布（Actions 用 NPM_TOKEN secret），本机已切 `npm:pi-glmbridger` 源。实测：包加载无错、zai 模型列表正常、/health 200、真实链路 402 Insufficient Balance（请求已通过上游鉴权，余额与代理无关）。
@@ -228,5 +237,5 @@ Logger.captured（模块化重构时为集成测试断言日志行而加）在 w
 | pi settings 片段（本仓库参考版） | `pi/settings.glm-snippet.json` |
 | pi 扩展（已安装） | `~/.pi/agent/extensions/piglmbridger.ts` |
 | pi settings | `~/.pi/agent/settings.json` |
-| 构建/测试 | `cargo build --release`、`cargo test`（单测 11 + 集成 4） |
+| 构建/测试 | `cargo build --release`、`cargo test`（单测 17 + 集成 6） |
 | 运行 | `./target/release/piglmbridger serve [--port]` |
