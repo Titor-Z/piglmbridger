@@ -143,6 +143,32 @@ impl Logger {
         self.write_line("INFO", msg);
     }
 
+    /// 仅写文件的原样分隔行（无时间戳前缀/级别）：会话标记等，终端零输出
+    pub fn marker(&self, text: &str) {
+        if self.disabled { return; }
+        if let Some(f) = &self.inner {
+            if let Ok(mut f) = f.lock() {
+                let _ = writeln!(f, "{text}");
+            }
+        }
+    }
+
+    /// 仅写文件（终端零输出）：前台模式由调用方自绘样式行时使用，文件里保留纯文本供 grep
+    pub fn info_file(&self, msg: &str) {
+        if self.disabled || self.level > LogLevel::Info { return; }
+        if let Some(c) = &self.captured {
+            if let Ok(mut c) = c.lock() {
+                c.push(format!("[INFO] {msg}"));
+            }
+        }
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        if let Some(f) = &self.inner {
+            if let Ok(mut f) = f.lock() {
+                let _ = writeln!(f, "{ts} [INFO ] {msg}");
+            }
+        }
+    }
+
     pub fn warn(&self, msg: String) {
         self.write_line("WARN", &msg);
     }
@@ -403,8 +429,28 @@ pub fn view_logs(path: &Path, lines: usize, follow: bool) {
     }
 
     if follow {
+        // 从最后一个“── 启动”会话标记处开始回放（本次会话全部日志），再跟踪新增；
+        // 无标记（老日志）时回退打印末尾 N 条
+        let start_pos = match session_start_offset(path) {
+            Some(off) => {
+                if let Ok(s) = read_from(path, off) {
+                    print!("{s}");
+                }
+                off
+            }
+            None => {
+                match read_last_lines(path, lines) {
+                    Ok(content) => print!("{content}"),
+                    Err(e) => {
+                        eprintln!("读取失败: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+            }
+        };
         println!("跟踪日志: {}（Ctrl+C 退出）", path.display());
-        if let Err(e) = follow_file(path) {
+        if let Err(e) = follow_file(path, start_pos) {
             eprintln!("跟踪失败: {e}");
             std::process::exit(1);
         }
@@ -419,6 +465,35 @@ pub fn view_logs(path: &Path, lines: usize, follow: bool) {
     }
 }
 
+/// 倒读文件，找最后一个“── 启动”会话标记的字节偏移（用于 log -f 从本次启动处回放）
+fn session_start_offset(path: &Path) -> Option<u64> {
+    const MARK: &str = "######";
+    let data = std::fs::read(path).ok()?;
+    // 从后往前找标记所在行的行首偏移
+    let mut line_start = 0usize;
+    let mut found: Option<u64> = None;
+    for (i, &b) in data.iter().enumerate() {
+        if b == b'\n' {
+            let line = &data[line_start..=i];
+            if std::str::from_utf8(line).map(|l| l.contains(MARK)).unwrap_or(false) {
+                found = Some(line_start as u64);
+            }
+            line_start = i + 1;
+        }
+    }
+    found
+}
+
+/// 读取从字节偏移 start 到文件尾的内容（log -f 回放用）
+fn read_from(path: &Path, start: u64) -> std::io::Result<String> {
+    use std::io::Seek;
+    let mut file = File::open(path)?;
+    file.seek(std::io::SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 fn read_last_lines(path: &Path, n: usize) -> std::io::Result<String> {
     let file = File::open(path)?;
     let reader = std::io::BufReader::new(file);
@@ -428,9 +503,9 @@ fn read_last_lines(path: &Path, n: usize) -> std::io::Result<String> {
 }
 
 /// 轮询式 tail -f
-fn follow_file(path: &Path) -> std::io::Result<()> {
+fn follow_file(path: &Path, start_pos: u64) -> std::io::Result<()> {
     let mut file = File::open(path)?;
-    let mut pos = std::fs::metadata(path)?.len();
+    let mut pos = start_pos;
     file.seek(std::io::SeekFrom::Start(pos))?;
 
     loop {

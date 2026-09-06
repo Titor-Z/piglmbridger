@@ -17,6 +17,14 @@
 
 ### [Unreleased]
 
+### 0.5.0
+- **新增**【CLI v2·docker 风格】：服务生命周期归一为 `service start/stop/restart/status`（`start -d` 后台守护）；裸 `piglmbridger` 只打印 help 不再隐式 serve（防打错字拉起 daemon）；`serve` 降为隐藏内部通道供 -d 自拉起；删除五个顶层子命令三轨归一。
+- **新增**【log -f 会话回放】：启动时落盘一行会话标记（`Logger::marker`，无时间戳前缀），`logs -f` 倒读文件定位最后一个标记，先回放本次会话全部日志再跟踪新增；无标记（老日志）回退末尾 N 条；默认行数 30→50，加 `log` 别名。
+- **美化**【启动/退出横幅】：● 图标统一（青=监听/蓝=上游/淡=文件），Ctrl+C 收尾改自绘样式行（`● 退出 · 运行时间 · N 个请求`），新增 `Logger::info_file()` 保文件日志纯文本；emoji 图标因宽度不可控全库清零。
+- **重构**【doctor 扁平清单化】：`✓/✗ 主行 + ! 附注行`，无总结行（✗ 即结论），结论移交退出码（`doctor && deploy` 可用）；端口状态三分法（本代理运行中 ✓ / 被他人占用 ✗ exit 1 / 空闲可监听）。
+- **美化**【stats 仪表盘化】：`● Stats` 标题 + 两列面板（标签按终端显示宽度填充，CJK 计 2），空数据安静退出。
+- **新增**【符号家族收敛】：共享助手 `status_line(tty, Option<bool>, text)`（绿✓/红✗/黄!，非 TTY 纯文本）替换全库 14 处散装 emoji；最终体系 ● + ✓/✗/! + 淡色文本，全库唯一（见 D17/D18）。
+
 ### 0.4.0
 - **修复**【内存泄漏·重构回归】：v 模块化加测试捕获时，`Logger.captured` Vec 在 `write_file`/`write_line` 无条件 push，生产进程每条日志永久驻留内存 → RSS 随会话数单调上涨。修复：`captured` 改 `Option<Arc<Mutex<Vec>>>>`，仅 `Logger::memory()` 为 `Some`，生产构造一律 `None`；新增单测 `captured_vec_must_not_grow_in_production`（生产 empty + memory 捕获）防回归。
 - **修复**【重构回归·结束行双打】：模块化重构时 `if done { return None }` 守卫从 unfold 闭包迁入 `StreamState::step()` 时被遗漏，导致 `[DONE]` 收尾后循环继续跑到 `Ok(None)` 分支再打一次结束行。修复：`step()` 开头恢复 done 守卫；集成测试补"结束行仅一次"回归断言。
@@ -101,6 +109,28 @@ pi 的 `/login` 里无法添加自定义 OpenAI provider；发现 pi 内置 `zai
 **结论/坑**：① 并发糊屏是最大风险——多流各刷各的行必交叉穿插，故全代理共用一条状态行，多流显示聚合（`N 个流 · 回传 X`）；② 普通行打印前必须先擦动画（tty_prepare），否则错误日志会拼在动画行尾；③ 流收尾有三条路径（正常 Ok(None)/idle 中止/客户端断开 NotifyDrop::drop），漏掉任一都会残留过期动画或泄漏 active_streams 表项——Drop 里做 cleanup 是兜底；④ 状态行擦除语义是“消失”而非“提交为历史”（用户明确要求终端只留两条），文件里才是完整中间过程；⑤ `\r\x1b[2K` 控制符只允许在 color && !file_only 分支出现，管道安全是底线（K09 同族纪律）。
 
 **D12 补充**：↑↓ 图标决策——用户问“用图标是否可删掉‘请求’文字”，结论：可以，且“教学职责归 README 图例不归日志行”（git 的 +/- 同理）；开始行时响应不存在故只有 ↑，结束行 ↑↓ 成对出现方向对比自解释；开始行不发 POST 字样（文件行保留完整 method/URL 供 grep）。
+
+### D18 — 状态行符号家族最终收敛：emoji 全库清零
+背景：service status/stop/start 仍用 ✅❌⛔⚠️ℹ️⏳ 散装 emoji，与 ✓/✗/! 家族并存。
+**结论**：新增共享助手 `status_line(tty, Option<bool>, text)`（Some(true)绿✓ / Some(false)红✗ / None黄!，非 TTY 纯文本），替换全库 14 处 emoji 行；**语义分级是本条核心**：未运行/stale/清理 pid 归 None(!) 而非红✗——它们是“当前状态说明”不是失败，误报红叉会稀释 ✗ 的信号强度；过程行（发 SIGTERM 等待）归淡色文本（⏳ 去除，家族同日志动画行）；验收标准：`grep ✅❌⚠️⛔⏳ src/` 清零（已达成）。最终符号体系：●（区块标题）+ ✓/✗（成功/失败）+ !（中性提示/附注）+ 淡色文本（过程/次要信息），全库唯一，新增须先推翻 D17。
+
+### D17 — stats 仪表盘化；符号家族收敛令
+背景：stats 仍是“==== 标题 + 裸文本”，外部两轮建议均推 `colored` + 行级 emoji + `[#][+][-][@][!][>]` 前缀体系。
+**结论**：重构为 `● Stats`（青 ● + 可选淡色 `· 最近 N 天`后缀）+ 五行两列（淡色标签固定 8 列 + 亮色数值：总数/平均/最大青、成功绿含百分比、非2xx红）+ 淡色数据源路径（去 {:?} 引号）；空数据分支统一 `● Stats · 暂无数据` 不报错退出；耗时复用 fmt_duration 但去 `+` 前缀（那是日志行耗时偏移语义，面板里是噪音）；标签列按**终端显示宽度**填充（CJK 计 2、ASCII 计 1，自算 disp_w；`{:<N$}` 按字符数填遇中文/混排必错位——“非2xx”就是实测反例），行首零边距。
+**硬否决存档（供后续 agent 不再重提）**：① `colored` crate 第四次被推第四次否决——手工 ANSI 基建已成型；② `format!("{:,}")` 千位分隔是幻觉 API（Rust std 没有，Python 才有），不为此引 num-format；③ 行级 emoji（📊⏱️📁）宽度不可控（D14 同案）；④ `[#][+][-][@][!][>]` 是第三套符号体系且 `[!]` 与 doctor 警告附注语义撞车——**家族语言收敛为 ●（区块标题）+ ✓/✗/!（状态与附注）两套，新增任何符号体系需先推翻本条**。
+
+### D16 — doctor 扁平清单化：一行一结论，结论移交退出码
+背景：旧 doctor 是“分节报告 + ===== 下划线 + [1/3] 段落计数 + ✅”，用户要求极客风。
+**结论**：重构为扁平检查清单：`✓/✗  主行（一行一结论）` + `   ! 附注行`（黄 ! + 淡色正文）；**无任何结论/总结行——✗ 即结论，! 即原因，全绿则安静退出**（两轮返工后定稿：用户明确否决“红 ✗ 结论行”）；三色体系（绿✓/红✗/黄!）与横幅 ● 同属手工 ANSI，零依赖；头部标题/段落计数全删（噪音）；**结论职责完全移交退出码**（doctor 结尾 `exit(ok?0:1)`，可 `piglmbridger doctor && deploy`）；非 TTY 零控制符。【补：端口状态三分法】端口被占用 ≠ 健康——需区分占用者：pid 文件存活 → ✓ “本代理运行中 (pid)”（daemon read_pid/is_alive 提升 pub(super)）；占用者非本代理 → ✗ 红叉 + exit 1（监听会失败，属真问题）。教训：状态符号必须反映“对用户目标而言是否健康”，不能因为“检测动作成功了”就打 ✓。验证：cargo test 12+4 绿；管道 cat -v 无 ANSI、伪 TTY 三色目视、401 分支实测 exit=0（只读探活，未碰 8123 与运行中进程）。
+
+### D15 — CLI v2：docker 风格重构（service 归一）
+背景：用户嫌 CLI 乱，要求仿 docker：裸命令只出 help，服务生命周期归入 `service`（用户点名 service 比 serve 准）。
+**结论**：① 裸 `piglmbridger` 只打印 help，不再隐式 serve（隐式启动是“打错字就拉起 daemon”的坑）；② `service start`（前台）/ `service start -d`（后台，父进程打印同款 ● 横幅 + pid 行）/ `service stop|restart|status`；内部保留隐藏 `serve --daemon` 通道供 -d 自拉起；`serve` 保留为 service 别名；③ 删除 Serve/Start/Stop/Restart/Status 五个顶层子命令三轨归一；④ 会话标记：启动时仅落盘一行 `###### %Y-%m-%d %H:%M:%S 启动 http://bind ######`（新增 Logger::marker，无 [INFO] 前缀避免双时间戳），`log -f` 据此从本次启动处回放+跟踪（session_start_offset 倒读找标记，无标记回退末尾 N 条）；修复 daemon 文件日志无启动记录的遗留；⑤ Logs 默认行数 30→50，加 alias "log"。
+**教训（本次实测踩坑）**：验证脚本里 pkill -f "piglmbridger serve --daemon" 会连用户正在给 pi 用的 8123 daemon 一起匹配误杀，且后台起 log -f 会挂住 shell 会话被工具超时拽断——**测试进程不得用宽模式 pkill，只按测试端口 lsof 精确清理；验证遵守“不写项目外目录、不影响 pi 运行”纪律。**
+
+### D14 — 启动横幅美化：采纳“图标+淡色+对齐”，否决 `colored` 与“删 logger.info”
+背景：外部建议用 `colored` crate + `println!` 重写 serve 启动信息（图标/淡色/对齐/空行）。
+**结论**：意图采纳，实现三处否决：① `colored` 引入是幻觉（Cargo.toml 从未有此依赖），D10 已否决过，继续手工 ANSI；② 原建议删掉 `logger.info` 是错的——daemon 模式没有那几行 eprintln，info 是 daemon 启动信息唯一落盘通道，必须保留；③ 管道/非 TTY 必须纯文本（K09 同族）。实现：仅前台分支输出横幅（图标 + 12 宽淡色标签 + 亮色关键值 + bigmodel.cn 时淡色“(国内站，确认 key 匹配)”后缀），TTY 判定复用 `ColorMode::Auto/Always/Never` 语义（stdout `is_terminal()`，需 `use std::io::IsTerminal`），首尾各一空行与日志分隔。logger.info 原样保留双轨。【后补（用户实测反馈）】：用户要求删掉启动时两条 INFO 行（“piglmbridger 启动…”/“上游是国内站…”），已从 serve 分支移除——启动信息现在只剩前台横幅，代价是 daemon 模式文件日志里不再有启动记录，文件日志首条将变成首条请求；标签栏宽 12→14（“Listening on”恰好 12 字符导致零间隙贴死值列）。【再补（用户实测反馈）：emoji 图标宽度/高度不一致】🌐🔗📁💻 属不同 Unicode 区块，宽度由终端字体自决，永远对不齐；改为统一 `●`（U+25CF，所有终端等宽单列）+ 颜色区分（青=监听/蓝=上游/淡=文件与提示），否决 Nerd Font 方案（要求对方装字体，管道/他人终端全是豆腐块）；若用户明确装了 NF 可再换 NF 字形。【三补（用户反馈退出日志风格脱节）】：Ctrl+C 收尾的两条时间戳 INFO 行与横幅风格不统一；改为前台自绘样式行（`● 退出 · 运行 fmt_duration · N 个请求 · 上游残断 M`，青色 ●），新增 `Logger::info_file()`（仅落盘不打终端）保住文件日志纯文本可 grep；“收到退出信号，无在途流直接退出”前台属噪音终端不打印仅落盘；有在途流时用黄色 ● 提示等待；daemon 行为不变（logger.info 照旧落盘）。经验：启动/退出这类“会话级”信息归终端样式行，逐请求日志归 logger 双通道，两者别混。验证：cargo test 12+4 绿；伪 TTY 有色/管道无控制符/daemon 终端零输出 + 文件落盘三项实测。
 
 ---
 
