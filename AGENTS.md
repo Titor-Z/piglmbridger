@@ -19,7 +19,7 @@
 
 ### 0.6.0
 - **新增**【GET /health】：代理探针端点，返回 `{ok,name,version}`；handler 在 lib 导出供集成测试复用（+1 集成断言，共 5）；无需鉴权、不碰上游（上游探测归 doctor）。
-- **新增**【npm 包 pi-glmbridger】：pi 侧扩展拆为独立 npm 包（`packages/pi-glmbridger/`），`pi install npm:pi-glmbridger` 一条命令安装；内置 `/bridger` 交互命令（状态检查/更改端口/服务控制/日志提示）；端口单一事实源（env > config.toml > 8123），改端口写代理同款配置文件，三处手动同步问题根治；主仓库 `pi/` 目录降级为迁移说明。详见 D20。
+- **新增**【npm 包 pi-glmbridger】：pi 侧扩展拆为独立 npm 包（`packages/pi-glmbridger/`），`pi install npm:pi-glmbridger` 一条命令安装；内置 `/bridger` 交互命令（状态检查/更改端口/服务控制/日志提示）；端口单一事实源（env > config.toml > 8123），改端口写代理同款配置文件，三处手动同步问题根治；主仓库旧 `pi/` 目录删除，README 安装指令换 `pi install npm:pi-glmbridger`。详见 D20。
 
 ### 0.5.0
 - **新增**【CLI v2·docker 风格】：服务生命周期归一为 `service start/stop/restart/status`（`start -d` 后台守护）；裸 `piglmbridger` 只打印 help 不再隐式 serve（防打错字拉起 daemon）；`serve` 降为隐藏内部通道供 -d 自拉起；删除五个顶层子命令三轨归一。
